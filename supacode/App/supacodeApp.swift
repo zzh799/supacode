@@ -531,8 +531,26 @@ struct SupacodeApp: App {
     }.first
   }
 
+  // MARK: - Scenes
+
+  /// A single-window scene. `WindowGroup` is the only window scene available on
+  /// both macOS 15 and 26 (the dedicated `Window` scene is macOS 26+), so
+  /// single-window semantics are emulated with `handlesExternalEvents(matching:
+  /// [])` (external events never spawn new instances) and focusing is routed
+  /// through `openWindow(id:)` / `NSApplication.surfaceMainWindow()`.
+  private func singleWindowScene<Content: View>(
+    _ title: String,
+    id: String,
+    @ViewBuilder content: () -> Content
+  ) -> some Scene {
+    WindowGroup(title, id: id) {
+      content()
+    }
+    .handlesExternalEvents(matching: [])
+  }
+
   var body: some Scene {
-    Window("Supacode", id: WindowID.main) {
+    singleWindowScene("Supacode", id: WindowID.main) {
       GhosttyColorSchemeSyncView(ghostty: ghostty) {
         ContentView(store: store, terminalManager: terminalManager)
           .environment(ghosttyShortcuts)
@@ -542,7 +560,6 @@ struct SupacodeApp: App {
       .openSettingsOnSelection(store: store)
       .openDeeplinkReferenceOnRequest(store: store)
     }
-    .handlesExternalEvents(matching: [])
     .environment(ghosttyShortcuts)
     .environment(commandKeyObserver)
     .environment(openActionIcons)
@@ -596,7 +613,7 @@ struct SupacodeApp: App {
         .help("Quit Supacode (⌘Q)")
       }
     }
-    Window("Settings", id: WindowID.settings) {
+    singleWindowScene("Settings", id: WindowID.settings) {
       SettingsView(store: store)
         .environment(ghosttyShortcuts)
         .environment(commandKeyObserver)
@@ -604,21 +621,18 @@ struct SupacodeApp: App {
         .toolbarColorScheme(store.settings.appearanceMode.colorScheme, for: .windowToolbar)
         .movesSettingsWindowToActiveSpace()
     }
-    .handlesExternalEvents(matching: [])
     .windowToolbarStyle(.unified)
     .defaultSize(width: 800, height: 600)
     .restorationBehavior(.disabled)
-    Window("Deeplink Reference", id: WindowID.deeplinkReference) {
+    singleWindowScene("Deeplink Reference", id: WindowID.deeplinkReference) {
       DeeplinkReferenceView()
     }
-    .handlesExternalEvents(matching: [])
     .windowToolbarStyle(.unified)
     .defaultSize(width: 720, height: 640)
     .restorationBehavior(.disabled)
-    Window("CLI Reference", id: WindowID.cliReference) {
+    singleWindowScene("CLI Reference", id: WindowID.cliReference) {
       CLIReferenceView()
     }
-    .handlesExternalEvents(matching: [])
     .windowToolbarStyle(.unified)
     .defaultSize(width: 720, height: 640)
     .restorationBehavior(.disabled)

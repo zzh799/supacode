@@ -70,7 +70,7 @@ you can bind an action to a hotkey or fire it from another app.
 
 ## Requirements
 
-- macOS 26.0+
+- macOS 15.0+
 - [mise](https://mise.jdx.dev/) for the pinned toolchain. Add `~/.local/bin` to your `PATH`.
 - git submodules: `git submodule update --init --recursive`
 - **Xcode 26.3** if you are on macOS 26.4+ (see [below](#building-on-macos-264-tahoe)).

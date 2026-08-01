@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-// SwiftUI's `Window` scene never sets `collectionBehavior`, so a reopened
+// SwiftUI's window scenes never set `collectionBehavior`, so a reopened
 // Settings window snaps back to the Space it was last shown on. Pin it to the
 // active Space and let it float over a full-screen main window.
 struct SettingsWindowSpaceBehavior: NSViewRepresentable {

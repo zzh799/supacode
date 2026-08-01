@@ -21,7 +21,7 @@ Supacode is a macOS terminal emulator that for running multiple coding agents in
 
 ## Code Guidelines
 
-- Target macOS 26.0+, Swift 6.0
+- Target macOS 15.0+, Swift 6.0
 - Before doing a big feature or when planning, consult with pfw (pointfree) skills on TCA, Observable best practices first.
 - Use `@ObservableState` for TCA feature state; use `@Observable` for non-TCA shared stores; never `ObservableObject`
 - Always mark `@Observable` classes with `@MainActor`

@@ -1,4 +1,4 @@
-/// Identifiers for the app's SwiftUI `Window` scenes.
+/// Identifiers for the app's SwiftUI window scenes.
 enum WindowID {
   static let main = "main"
   static let settings = "settings"
