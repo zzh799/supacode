@@ -3120,7 +3120,8 @@ struct RepositoriesFeature {
         if !groupPinned, !groupActive {
           @Shared(.appStorage("highlightRelevantOnboardingDismissedAt"))
           var dismissedAt: Date = .distantPast
-          if !HighlightRelevantOnboardingCardView.isDismissed(at: dismissedAt) {
+          let dismissedAtValue = dismissedAt
+          if !MainActor.assumeIsolated({ HighlightRelevantOnboardingCardView.isDismissed(at: dismissedAtValue) }) {
             $dismissedAt.withLock { $0 = now }
           }
         }

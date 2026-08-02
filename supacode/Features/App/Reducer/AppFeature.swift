@@ -825,7 +825,7 @@ struct AppFeature {
         }
         state.alert = quitConfirmationAlert(
           terminateOnQuit: state.settings.terminateSessionsOnQuit,
-          hasBlockingScripts: terminalClient.hasInflightBlockingScripts()
+          hasBlockingScripts: MainActor.assumeIsolated({ terminalClient.hasInflightBlockingScripts() })
         )
         // Without surfacing the main window, an alert raised from Cmd+Q
         // when no window is up has no scene to anchor to and `terminate()`
@@ -900,7 +900,7 @@ struct AppFeature {
         }
 
       case .jumpToLatestUnread:
-        guard let location = terminalClient.latestUnreadNotification() else {
+        guard let location = MainActor.assumeIsolated({ terminalClient.latestUnreadNotification() }) else {
           jumpLogger.debug("jumpToLatestUnread invoked with no unread notifications.")
           return .none
         }
@@ -1469,9 +1469,9 @@ struct AppFeature {
         if action == "prompt_surface_title" || action == "prompt_tab_title" {
           // Capture the focused tab synchronously so a fast tab switch between dispatch
           // and effect execution can't redirect the rename to the wrong tab.
-          let tabID = terminalClient.selectedTabID(worktree.id)
+          let tabID = MainActor.assumeIsolated({ terminalClient.selectedTabID(worktree.id) })
           command = .beginTabRename(worktree, tabID: tabID)
-        } else if let surfaceID = terminalClient.selectedSurfaceID(worktree.id) {
+        } else if let surfaceID = MainActor.assumeIsolated({ terminalClient.selectedSurfaceID(worktree.id) }) {
           command = .performBindingActionOnSurface(worktree, surfaceID: surfaceID, action: action)
         } else {
           command = .performBindingAction(worktree, action: action)
@@ -2391,7 +2391,7 @@ struct AppFeature {
       // Reject explicit IDs that collide with an existing or in-flight tab, so a
       // duplicate id can't have one creation resolve the other's ack.
       if let id,
-        terminalClient.tabExists(worktreeID, TerminalTabID(rawValue: id))
+        MainActor.assumeIsolated({ terminalClient.tabExists(worktreeID, TerminalTabID(rawValue: id)) })
           || Self.hasPendingCreationAck(id: id, state: state)
       {
         state.alert = AlertState {
@@ -2440,7 +2440,7 @@ struct AppFeature {
           message: "The tab title has no visible characters. Pass an empty title to clear it.")
         return .none
       }
-      guard terminalClient.tabCanRename(worktreeID, TerminalTabID(rawValue: tabID)) else {
+      guard MainActor.assumeIsolated({ terminalClient.tabCanRename(worktreeID, TerminalTabID(rawValue: tabID)) }) else {
         deeplinkLogger.warning("Tab \(tabID) has a locked title in worktree \(worktreeID)")
         state.alert = AlertState {
           TextState("Tab cannot be renamed")
@@ -2500,7 +2500,7 @@ struct AppFeature {
       // Reject explicit IDs that collide with an existing or in-flight surface, so
       // a duplicate id can't have one split resolve the other's ack.
       if let id,
-        terminalClient.surfaceExistsInWorktree(worktreeID, id)
+        MainActor.assumeIsolated({ terminalClient.surfaceExistsInWorktree(worktreeID, id) })
           || Self.hasPendingCreationAck(id: id, state: state)
       {
         state.alert = AlertState {
@@ -2956,7 +2956,7 @@ struct AppFeature {
   /// prompt-waiting (`.awaitingInput`) agents are at risk. Running user
   /// scripts also block because their stdout history dies with the shell.
   private func hasActiveWorkBlockingQuit(state: State) -> Bool {
-    if terminalClient.hasInflightBlockingScripts() { return true }
+    if MainActor.assumeIsolated({ terminalClient.hasInflightBlockingScripts() }) { return true }
     return state.repositories.sidebarItems.contains { item in
       if item.lifecycle.isTerminating || item.lifecycle == .pending { return true }
       if !item.runningScripts.isEmpty { return true }
@@ -3289,7 +3289,7 @@ struct AppFeature {
     tabID: UUID,
     state: inout State
   ) -> Bool {
-    guard terminalClient.tabExists(worktreeID, TerminalTabID(rawValue: tabID)) else {
+    guard MainActor.assumeIsolated({ terminalClient.tabExists(worktreeID, TerminalTabID(rawValue: tabID)) }) else {
       deeplinkLogger.warning("Tab \(tabID) not found in worktree \(worktreeID)")
       state.alert = AlertState {
         TextState("Tab not found")
@@ -3313,7 +3313,7 @@ struct AppFeature {
     state: inout State
   ) -> Bool {
     guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return false }
-    guard terminalClient.surfaceExists(worktreeID, TerminalTabID(rawValue: tabID), surfaceID) else {
+    guard MainActor.assumeIsolated({ terminalClient.surfaceExists(worktreeID, TerminalTabID(rawValue: tabID), surfaceID) }) else {
       deeplinkLogger.warning("Surface \(surfaceID) not found in tab \(tabID) of worktree \(worktreeID)")
       state.alert = AlertState {
         TextState("Surface not found")
@@ -3370,7 +3370,7 @@ struct AppFeature {
     let percentEncodingSet = CharacterSet.urlPathAllowed.subtracting(.init(charactersIn: "/"))
     let encodedWorktreeID =
       worktreeID.rawValue.addingPercentEncoding(withAllowedCharacters: percentEncodingSet) ?? worktreeID.rawValue
-    guard let tabID = terminalClient.tabID(worktreeID, surfaceID) else {
+    guard let tabID = MainActor.assumeIsolated({ terminalClient.tabID(worktreeID, surfaceID) }) else {
       notificationsLogger.debug(
         "Surface \(surfaceID) is no longer attached to a tab in \(worktreeID); "
           + "degrading tap deeplink to the worktree root."

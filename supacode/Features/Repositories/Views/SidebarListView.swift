@@ -536,39 +536,57 @@ private struct SidebarBlockedRepositorySection: View {
 
 private struct SidebarPlaceholderView: View {
   var body: some View {
+    // `section` is used (passed to the subview) so Swift 6.1's overload
+    // resolution does not misroute this `ForEach` to Charts' `ChartContentBuilder`
+    // (unavailable below macOS 16) and break the macOS 15 build.
     ForEach(0..<2, id: \.self) { section in
-      Section {
-        // Named (not `_`) parameter: Swift 6.1's overload resolution
-        // misroutes a `ForEach` whose closure ignores its element to Charts'
-        // `ChartContentBuilder` overload.
-        ForEach(0..<3, id: \.self) { index in
-          Label {
-            VStack(alignment: .leading, spacing: 2) {
-              Text("placeholder-branch")
-                .font(.body)
-                .lineLimit(1)
-                .redacted(reason: .placeholder)
-                .shimmer(isActive: true)
-              Text("placeholder")
-                .font(.footnote)
-                .lineLimit(1)
-                .redacted(reason: .placeholder)
-                .shimmer(isActive: true)
-            }
-          } icon: {
-            Image(systemName: "arrow.triangle.branch")
-              .accessibilityHidden(true)
-              .foregroundStyle(.secondary)
-              .redacted(reason: .placeholder)
-              .shimmer(isActive: true)
-          }
-        }
-      } header: {
-        Text(section == 0 ? "repository" : "second-repo")
-          .foregroundStyle(.secondary)
+      PlaceholderRepositorySection(section: section)
+    }
+  }
+}
+
+/// One placeholder repository's rows. Extracted from the nested
+/// `ForEach`/`Section` builder so the `ForEach`+`Section` combination never
+/// resolves against `ChartContentBuilder` (a Swift 6.1 regression that fails
+/// below macOS 16).
+private struct PlaceholderRepositorySection: View {
+  let section: Int
+
+  var body: some View {
+    Section {
+      PlaceholderRow()
+      PlaceholderRow()
+      PlaceholderRow()
+    } header: {
+      Text(section == 0 ? "repository" : "second-repo")
+        .foregroundStyle(.secondary)
+        .redacted(reason: .placeholder)
+        .shimmer(isActive: true)
+    }
+  }
+}
+
+private struct PlaceholderRow: View {
+  var body: some View {
+    Label {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("placeholder-branch")
+          .font(.body)
+          .lineLimit(1)
+          .redacted(reason: .placeholder)
+          .shimmer(isActive: true)
+        Text("placeholder")
+          .font(.footnote)
+          .lineLimit(1)
           .redacted(reason: .placeholder)
           .shimmer(isActive: true)
       }
+    } icon: {
+      Image(systemName: "arrow.triangle.branch")
+        .accessibilityHidden(true)
+        .foregroundStyle(.secondary)
+        .redacted(reason: .placeholder)
+        .shimmer(isActive: true)
     }
   }
 }

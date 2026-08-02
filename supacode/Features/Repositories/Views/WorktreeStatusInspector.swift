@@ -465,20 +465,38 @@ private struct NotificationsInspectorContent: View {
         // the on-screen rows on open, never the whole log or its markdown bodies.
         List {
           ForEach(groups) { repository in
-            ForEach(repository.worktrees) { worktree in
-              WorktreeNotificationsSection(
-                repository: repository,
-                worktree: worktree,
-                onSelectNotification: onSelectNotification,
-                onSelectSurface: onSelectSurface
-              )
-            }
+            RepositoryWorktreesSection(
+              repository: repository,
+              onSelectNotification: onSelectNotification,
+              onSelectSurface: onSelectSurface
+            )
           }
         }
         .listStyle(.inset)
         // Let the window's terminal background (set in WindowChromeApplier) show through.
         .scrollContentBackground(.hidden)
       }
+    }
+  }
+}
+
+/// The worktrees of a single repository, rendered as `WorktreeNotificationsSection`
+/// rows. Extracted from the doubly-nested `List`/`ForEach` builder so Swift 6.1's
+/// overload resolution doesn't regress to `ChartContentBuilder` (whose
+/// `buildPartialBlock` is unavailable below macOS 16) and break the macOS 15 build.
+private struct RepositoryWorktreesSection: View {
+  let repository: ToolbarNotificationRepositoryGroup
+  let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+  let onSelectSurface: (Worktree.ID, UUID) -> Void
+
+  var body: some View {
+    ForEach(repository.worktrees) { worktree in
+      WorktreeNotificationsSection(
+        repository: repository,
+        worktree: worktree,
+        onSelectNotification: onSelectNotification,
+        onSelectSurface: onSelectSurface
+      )
     }
   }
 }

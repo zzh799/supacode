@@ -24,7 +24,10 @@ struct WindowFocusObserverView: NSViewRepresentable {
 
 final class WindowFocusObserverNSView: NSView {
   var onWindowActivityChanged: (WindowActivityState) -> Void = { _ in }
-  private var observers: [NSObjectProtocol] = []
+  // `nonisolated(unsafe)` so the Swift 6 nonisolated `deinit` can release the
+  // tokens. NotificationCenter is itself thread-safe, and every mutation
+  // (updateObservers / clearObservers / deinit) happens on the main thread.
+  private nonisolated(unsafe) var observers: [NSObjectProtocol] = []
   private weak var observedWindow: NSWindow?
   private var lastEmittedActivity: WindowActivityState?
 

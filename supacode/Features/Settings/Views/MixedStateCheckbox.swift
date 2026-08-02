@@ -42,6 +42,7 @@ struct MixedStateCheckbox: NSViewRepresentable {
     }
   }
 
+  @MainActor
   final class Coordinator: NSObject {
     var onToggle: (Bool) -> Void
 
@@ -50,13 +51,12 @@ struct MixedStateCheckbox: NSViewRepresentable {
     }
 
     @objc func toggled(_ sender: NSButton) {
-      // NSButton actions arrive on the main thread; hop the actor for the
-      // `@MainActor` `NSButton.state` access.
-      MainActor.assumeIsolated {
-        // Clicking mixed or off → on; clicking on → off.
-        let newEnabled = sender.state != .off
-        onToggle(newEnabled)
-      }
+      // NSButton actions arrive on the main thread, and `Coordinator` is
+      // `@MainActor`, so `sender`/`onToggle` are both main-actor isolated —
+      // no `assumeIsolated` hop (and no `@Sendable` capture of `self`) needed.
+      // Clicking mixed or off → on; clicking on → off.
+      let newEnabled = sender.state != .off
+      onToggle(newEnabled)
     }
   }
 }

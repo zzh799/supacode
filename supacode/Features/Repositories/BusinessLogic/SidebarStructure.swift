@@ -620,7 +620,6 @@ extension RepositoriesFeature.State {
   /// Pure by contract: every recompute here is a function of state alone.
   /// `.openActionResolution` only prunes here; resolving an entry reads that
   /// repository's `supacode.json`, and a reducer must not touch disk.
-  @MainActor
   mutating func applyCacheRecomputes(_ invalidations: CacheInvalidations) {
     if invalidations.contains(.sidebarStructure) {
       recomputeSidebarStructureIfChanged()

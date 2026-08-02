@@ -642,9 +642,8 @@ struct WorktreeDetailView: View {
           WorktreeToolbarTitleView(content: toolbarState.titleContent)
         }
       }
-      .sharedBackgroundVisibility(.hidden)
 
-      ToolbarSpacer(.flexible)
+      ToolbarItem(placement: .navigation) { Spacer() }
 
       ToolbarItem {
         openMenu(openActionSelection: toolbarState.openActionSelection)
@@ -653,7 +652,6 @@ struct WorktreeDetailView: View {
           .id(toolbarState.openMenuIdentity)
           .transaction { $0.animation = nil }
       }
-      ToolbarSpacer(.fixed)
 
       ToolbarItem {
         ScriptMenu(
@@ -694,28 +692,16 @@ struct WorktreeDetailView: View {
       if let primarySelection {
         let canOpenPrimary = toolbarState.canOpen(primarySelection)
         Menu {
-          Group {
-            ForEach(availableActions) { action in
-              let isDefault = action == primarySelection
-              Button {
-                onOpenActionSelectionChanged(action)
-                onOpenWorktree(action)
-              } label: {
-                OpenWorktreeActionMenuLabelView(action: action)
-              }
-              .buttonStyle(.plain)
-              .help(openActionHelpText(for: action, isDefault: isDefault))
-              .disabled(!toolbarState.canOpen(action))
-            }
-            Divider()
-            Button {
-              onRevealInFinder()
-            } label: {
-              OpenWorktreeActionMenuLabelView(action: .finder)
-            }
-            .help("Reveal in Finder (\(revealInFinderShortcut))")
-            .disabled(toolbarState.remoteOpenHost != nil)
-          }
+          OpenActionMenuItems(
+            actions: availableActions,
+            primarySelection: primarySelection,
+            toolbarState: toolbarState,
+            onOpenActionSelectionChanged: onOpenActionSelectionChanged,
+            onOpenWorktree: onOpenWorktree,
+            onRevealInFinder: onRevealInFinder,
+            helpText: { openActionHelpText(for: $0, isDefault: $1) },
+            revealInFinderShortcut: revealInFinderShortcut
+          )
         } label: {
           // Icon-only toolbar label (icon + system chevron). Plain `Label`
           // with no `.labelStyle` so the toolbar collapses the title yet
@@ -750,6 +736,48 @@ struct WorktreeDetailView: View {
         overrides: settingsFile.global.shortcutOverrides
       )
       return "\(action.title) (\(display))"
+    }
+  }
+
+  /// Standalone `View` wrapper for the open-action submenu items.
+  ///
+  /// Extracted out of `WorktreeToolbarContent.openMenu` because a `ForEach`
+  /// placed directly inside a `Menu` content builder triggers a Swift 6.1
+  /// overload-resolution regression: the result builder is mis-routed to
+  /// Charts' `ChartContentBuilder` (macOS 16+ only), which lacks a
+  /// sufficiently-available `buildBlock`. Hosting the `ForEach` inside a
+  /// dedicated `ViewBuilder` scope keeps the builder unambiguous on macOS 15.
+  fileprivate struct OpenActionMenuItems: View {
+    let actions: [OpenWorktreeAction]
+    let primarySelection: OpenWorktreeAction
+    let toolbarState: WorktreeToolbarState
+    let onOpenActionSelectionChanged: (OpenWorktreeAction) -> Void
+    let onOpenWorktree: (OpenWorktreeAction) -> Void
+    let onRevealInFinder: () -> Void
+    let helpText: (OpenWorktreeAction, Bool) -> String
+    let revealInFinderShortcut: String
+
+    var body: some View {
+      ForEach(actions) { action in
+        let isDefault = action == primarySelection
+        Button {
+          onOpenActionSelectionChanged(action)
+          onOpenWorktree(action)
+        } label: {
+          OpenWorktreeActionMenuLabelView(action: action)
+        }
+        .buttonStyle(.plain)
+        .help(helpText(action, isDefault))
+        .disabled(!toolbarState.canOpen(action))
+      }
+      Divider()
+      Button {
+        onRevealInFinder()
+      } label: {
+        OpenWorktreeActionMenuLabelView(action: .finder)
+      }
+      .help("Reveal in Finder (\(revealInFinderShortcut))")
+      .disabled(toolbarState.remoteOpenHost != nil)
     }
   }
 
@@ -1062,9 +1090,8 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
         .shimmer(isActive: true)
       }
     }
-    .sharedBackgroundVisibility(.hidden)
 
-    ToolbarSpacer(.flexible)
+    ToolbarItem(placement: .navigation) { Spacer() }
 
     ToolbarItemGroup {
       Button {
@@ -1074,7 +1101,6 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
       .redacted(reason: .placeholder)
       .shimmer(isActive: true)
     }
-    ToolbarSpacer(.fixed)
 
     ToolbarItem {
       Button {

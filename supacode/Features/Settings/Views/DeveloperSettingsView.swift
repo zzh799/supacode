@@ -68,21 +68,34 @@ private struct CodingAgentsSections: View {
     let uninstalled = store.uninstalledAgents
     Group {
       if !mainRows.isEmpty {
-        Section {
-          ForEach(mainRows, id: \.self) { agent in
-            AgentIntegrationRow(
-              agent: agent,
-              state: store.agentIntegrationStates[agent] ?? .checking,
-              installAction: { store.send(.agentIntegrationInstallTapped(agent)) },
-              uninstallAction: { store.send(.agentIntegrationUninstallTapped(agent)) }
-            )
-          }
-        }
+        InstalledAgentsSection(store: store, agents: mainRows)
       }
       if !uninstalled.isEmpty {
         Section {
           AgentInstallPromptRow(agents: uninstalled) { store.send(.agentInstallSheetOpenTapped) }
         }
+      }
+    }
+  }
+}
+
+/// Installed-agent rows. Extracted from `CodingAgentsSections` so the
+/// `ForEach` resolves under `ViewBuilder` instead of Swift 6.1's
+/// `ChartContentBuilder` regression (whose `buildPartialBlock` is unavailable
+/// below macOS 16), which otherwise breaks the macOS 15 build.
+private struct InstalledAgentsSection: View {
+  let store: StoreOf<SettingsFeature>
+  let agents: [SkillAgent]
+
+  var body: some View {
+    Section {
+      ForEach(agents, id: \.self) { agent in
+        AgentIntegrationRow(
+          agent: agent,
+          state: store.agentIntegrationStates[agent] ?? .checking,
+          installAction: { store.send(.agentIntegrationInstallTapped(agent)) },
+          uninstallAction: { store.send(.agentIntegrationUninstallTapped(agent)) }
+        )
       }
     }
   }

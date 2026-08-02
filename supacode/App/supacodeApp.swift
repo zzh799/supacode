@@ -544,7 +544,7 @@ struct SupacodeApp: App {
   private func singleWindowScene<Content: View>(
     _ title: String,
     id: String,
-    @ViewBuilder content: () -> Content
+    @ViewBuilder content: @escaping () -> Content
   ) -> some Scene {
     WindowGroup(title, id: id) {
       content()
