@@ -1,7 +1,30 @@
+import AppKit
 import ComposableArchitecture
 import SupacodeSettingsFeature
 import SupacodeSettingsShared
 import SwiftUI
+
+// MARK: - Settings window presentation.
+
+/// Surfaces the already-open settings window, or opens it when none exists.
+///
+/// The settings scene is a `WindowGroup`, so `openWindow(id:)` spawns a fresh
+/// window instance on every call. Re-invoking it while a window is already
+/// open — e.g. switching sidebar pages, or re-triggering the selection bridge
+/// — would pile up duplicate settings windows, so every call site goes through
+/// this instead of calling `openWindow` directly.
+@MainActor
+private enum SettingsWindowPresenter {
+  static func present(openWindow: OpenWindowAction) {
+    if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == WindowID.settings }) {
+      if window.isMiniaturized { window.deminiaturize(nil) }
+      window.makeKeyAndOrderFront(nil)
+      NSApp.activate()
+    } else {
+      openWindow(id: WindowID.settings)
+    }
+  }
+}
 
 // MARK: - Selection → settings window bridge.
 
@@ -15,7 +38,11 @@ private struct OpenSettingsOnSelection: ViewModifier {
     content
       .onChange(of: store.settings.selection) { _, new in
         guard new != nil else { return }
-        openWindow(id: WindowID.settings)
+        // Do not gate on `old == nil`: the modifier's reference value can be
+        // stale (the main window doesn't re-render for selection changes), so
+        // a sidebar click inside the open window can look like a nil → non-nil
+        // transition. The window-existence check below is authoritative.
+        SettingsWindowPresenter.present(openWindow: openWindow)
       }
   }
 }
@@ -38,7 +65,7 @@ struct SettingsMenuButton: View {
     let settings = AppShortcuts.openSettings.effective(from: shortcutOverrides)
     Button("Settings...", systemImage: "gear") {
       onOpen()
-      openWindow(id: WindowID.settings)
+      SettingsWindowPresenter.present(openWindow: openWindow)
     }
     .appKeyboardShortcut(settings)
   }

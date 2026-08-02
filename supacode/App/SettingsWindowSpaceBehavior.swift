@@ -28,6 +28,10 @@ final class SettingsWindowSpaceBehaviorNSView: NSView {
     super.viewDidMoveToWindow()
     clearObserver()
     guard let window else { return }
+    // Tag the window so callers can tell the settings window is already open.
+    // The settings scene is a WindowGroup, and openWindow(id:) spawns a fresh
+    // instance every call, so detection has to go through the window itself.
+    window.identifier = NSUserInterfaceItemIdentifier(WindowID.settings)
     // Re-assert on key so a SwiftUI reconfigure can't clobber the behavior.
     keyObserver = NotificationCenter.default.addObserver(
       forName: NSWindow.didBecomeKeyNotification,
@@ -43,6 +47,9 @@ final class SettingsWindowSpaceBehaviorNSView: NSView {
 
   private func apply() {
     guard let window else { return }
+    // Re-assert the identifier here too so a SwiftUI reconfigure that replaces
+    // the window can't silently drop it.
+    window.identifier = NSUserInterfaceItemIdentifier(WindowID.settings)
     var behavior = window.collectionBehavior
     behavior.remove(.canJoinAllSpaces)
     behavior.remove(.fullScreenPrimary)
