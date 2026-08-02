@@ -345,9 +345,7 @@ private struct SidebarHoistSummaryRow: View {
       .contentShape(.interaction, .rect)
     }
     .buttonStyle(.plain)
-    .listRowInsets(.leading, 0)
-    .listRowInsets(.trailing, 4)
-    .listRowInsets(.vertical, 4)
+    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 4))
     .moveDisabled(true)
     .help("Show \(repositoryName)'s pinned and active worktrees")
     .accessibilityLabel("\(summary.label) above. Scroll to them.")
@@ -540,7 +538,10 @@ private struct SidebarPlaceholderView: View {
   var body: some View {
     ForEach(0..<2, id: \.self) { section in
       Section {
-        ForEach(0..<3, id: \.self) { _ in
+        // Named (not `_`) parameter: Swift 6.1's overload resolution
+        // misroutes a `ForEach` whose closure ignores its element to Charts'
+        // `ChartContentBuilder` overload.
+        ForEach(0..<3, id: \.self) { index in
           Label {
             VStack(alignment: .leading, spacing: 2) {
               Text("placeholder-branch")

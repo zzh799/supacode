@@ -3,7 +3,10 @@ import ProjectDescription
 let tuist = Tuist(
   fullHandle: "supabitapp/supacode",
   project: .tuist(
-    compatibleXcodeVersions: .upToNextMajor("26.0"),
+    // Development targets macOS 15, whose toolchains start at Xcode 16. The
+    // ghostty Zig build keeps its own stricter Xcode 26.3 check in
+    // scripts/select-developer-dir.sh, so only relax the generation gate here.
+    compatibleXcodeVersions: .upToNextMajor("16.0"),
     swiftVersion: "6.0",
     generationOptions: .options(
       optionalAuthentication: true

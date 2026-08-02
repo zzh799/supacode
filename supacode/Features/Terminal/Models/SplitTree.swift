@@ -263,6 +263,7 @@ struct SplitTree<ViewType: NSView & Identifiable> {
     return .init(root: newRoot, zoomed: nil)
   }
 
+  @MainActor
   func viewBounds() -> CGSize {
     root?.viewBounds() ?? .zero
   }
@@ -569,6 +570,7 @@ extension SplitTree.Node {
     }
   }
 
+  @MainActor
   func viewBounds() -> CGSize {
     switch self {
     case .leaf(let view):

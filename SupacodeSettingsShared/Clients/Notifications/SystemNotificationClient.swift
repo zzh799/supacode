@@ -1,7 +1,11 @@
 import AppKit
 import ComposableArchitecture
 import Foundation
-import UserNotifications
+// UserNotifications types (UNNotification, UNNotificationResponse, …) are not
+// Sendable in the macOS 15 SDK, but the framework dispatches them onto the main
+// actor synchronously. @preconcurrency opts those types out of Swift 6 strict
+// sendability so the delegate conformance compiles cleanly.
+@preconcurrency import UserNotifications
 
 /// Payload key under which the system notification stores the deeplink URL
 /// that should be dispatched when the user taps the notification banner.
@@ -13,11 +17,13 @@ private nonisolated let systemNotificationLogger = SupaLogger("SystemNotificatio
 private final class ForegroundSystemNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
   var onDeeplinkTap: ((URL) -> Void)?
 
-  // Both delegate methods run on the main actor so reading / writing
-  // `onDeeplinkTap` is a plain isolated access with no bridging hop. The
-  // leading `Task.yield()` satisfies the async-without-await lint and
-  // matches the pattern used elsewhere for protocol-required async stubs.
-  func userNotificationCenter(
+  // UNUserNotificationCenterDelegate's requirements are nonisolated, so
+  // conforming from a @MainActor class would require sending non-Sendable
+  // UNNotification/UNUserNotificationCenter values across isolation domains.
+  // UserNotifications always dispatches these callbacks on the main thread, so
+  // we implement them nonisolated and hop back to the main actor with
+  // MainActor.run only for the small bit that touches actor state.
+  nonisolated func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     willPresent notification: UNNotification
   ) async -> UNNotificationPresentationOptions {
@@ -25,7 +31,7 @@ private final class ForegroundSystemNotificationDelegate: NSObject, UNUserNotifi
     return [.badge, .sound, .banner]
   }
 
-  func userNotificationCenter(
+  nonisolated func userNotificationCenter(
     _ center: UNUserNotificationCenter,
     didReceive response: UNNotificationResponse
   ) async {
@@ -36,7 +42,9 @@ private final class ForegroundSystemNotificationDelegate: NSObject, UNUserNotifi
       systemNotificationLogger.warning("Dropped notification tap: userInfo deeplink is not a valid URL: \(raw)")
       return
     }
-    onDeeplinkTap?(url)
+    await MainActor.run {
+      self.onDeeplinkTap?(url)
+    }
   }
 }
 

@@ -35,6 +35,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
+  @MainActor
   private final class CachedValue<T> {
     private var value: T?
     private let fetch: () -> T
@@ -58,7 +59,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
       let fetched = fetch()
       value = fetched
       expiryTask?.cancel()
-      expiryTask = Task { [weak self] in
+      expiryTask = Task { @MainActor [weak self] in
         guard let self else { return }
         try? await ContinuousClock().sleep(for: self.duration)
         guard !Task.isCancelled else { return }
@@ -263,24 +264,43 @@ final class GhosttySurfaceView: NSView, Identifiable {
     fatalError("init(coder:) is not supported")
   }
 
-  isolated deinit {
-    if let eventMonitor {
-      NSEvent.removeMonitor(eventMonitor)
-    }
-    clearNotificationObservers()
-    let id = ObjectIdentifier(self)
+  deinit {
+    // Views tear down on the main thread, so hoist the main-actor cleanup
+    // through assumeIsolated. `self` is a @MainActor class, so sending it into
+    // the (assumed) main actor closure is safe.
     MainActor.assumeIsolated {
+      if let eventMonitor {
+        NSEvent.removeMonitor(eventMonitor)
+      }
+      // Inlined clearNotificationObservers(); it is main-actor isolated.
+      let center = NotificationCenter.default
+      for observer in notificationObservers {
+        center.removeObserver(observer)
+      }
+      notificationObservers.removeAll()
+      let id = ObjectIdentifier(self)
       SecureInput.shared.removeScoped(id)
-    }
-    closeSurface()
-    if let workingDirectoryCString {
-      free(workingDirectoryCString)
-    }
-    if let commandCString {
-      free(commandCString)
-    }
-    if let initialInputCString {
-      free(initialInputCString)
+      // Inlined closeSurface(); views tear down on the main thread.
+      if let surface {
+        if let surfaceRef {
+          runtime.unregisterSurface(surfaceRef)
+        }
+        self.surfaceRef = nil
+        ghostty_surface_free(surface)
+        self.surface = nil
+        bridge.surface = nil
+        lastOcclusion = nil
+        lastSurfaceFocus = nil
+      }
+      if let workingDirectoryCString {
+        free(workingDirectoryCString)
+      }
+      if let commandCString {
+        free(commandCString)
+      }
+      if let initialInputCString {
+        free(initialInputCString)
+      }
     }
   }
 
@@ -1291,21 +1311,23 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
-  override func doCommand(by selector: Selector) {
-    if let lastPerformKeyEvent,
-      let current = NSApp.currentEvent,
-      lastPerformKeyEvent == current.timestamp
-    {
-      NSApp.sendEvent(current)
-      return
-    }
-    switch selector {
-    case #selector(moveToBeginningOfDocument(_:)):
-      performBindingAction("scroll_to_top")
-    case #selector(moveToEndOfDocument(_:)):
-      performBindingAction("scroll_to_bottom")
-    default:
-      break
+  nonisolated override func doCommand(by selector: Selector) {
+    MainActor.assumeIsolated {
+      if let lastPerformKeyEvent,
+        let current = NSApp.currentEvent,
+        lastPerformKeyEvent == current.timestamp
+      {
+        NSApp.sendEvent(current)
+        return
+      }
+      switch selector {
+      case #selector(moveToBeginningOfDocument(_:)):
+        performBindingAction("scroll_to_top")
+      case #selector(moveToEndOfDocument(_:)):
+        performBindingAction("scroll_to_bottom")
+      default:
+        break
+      }
     }
   }
 
@@ -1804,109 +1826,132 @@ extension GhosttySurfaceView {
 }
 
 extension GhosttySurfaceView: NSTextInputClient {
-  func hasMarkedText() -> Bool {
-    markedText.length > 0
+  nonisolated func hasMarkedText() -> Bool {
+    MainActor.assumeIsolated { markedText.length > 0 }
   }
 
-  func markedRange() -> NSRange {
-    guard markedText.length > 0 else { return NSRange() }
-    return NSRange(location: 0, length: markedText.length)
+  nonisolated func markedRange() -> NSRange {
+    MainActor.assumeIsolated {
+      guard markedText.length > 0 else { return NSRange() }
+      return NSRange(location: 0, length: markedText.length)
+    }
   }
 
-  func selectedRange() -> NSRange {
-    guard let surface else { return NSRange() }
-    var text = ghostty_text_s()
-    guard ghostty_surface_read_selection(surface, &text) else { return NSRange() }
-    defer { ghostty_surface_free_text(surface, &text) }
-    return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
+  nonisolated func selectedRange() -> NSRange {
+    MainActor.assumeIsolated {
+      guard let surface else { return NSRange() }
+      var text = ghostty_text_s()
+      guard ghostty_surface_read_selection(surface, &text) else { return NSRange() }
+      defer { ghostty_surface_free_text(surface, &text) }
+      return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
+    }
   }
 
-  func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+  nonisolated func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+    // Unbox to a Sendable String before crossing into the main actor so the
+    // signature matches NSTextInputClient's non-sending `Any` parameter.
+    let resolved: String
     switch string {
     case let attributedText as NSAttributedString:
-      markedText = NSMutableAttributedString(attributedString: attributedText)
+      resolved = attributedText.string
     case let stringValue as String:
-      markedText = NSMutableAttributedString(string: stringValue)
+      resolved = stringValue
     default:
       return
     }
-    if keyTextAccumulator == nil {
-      syncPreedit()
+    MainActor.assumeIsolated {
+      markedText = NSMutableAttributedString(string: resolved)
+      if keyTextAccumulator == nil {
+        syncPreedit()
+      }
     }
   }
 
-  func unmarkText() {
-    if markedText.length > 0 {
-      markedText.mutableString.setString("")
-      syncPreedit()
+  nonisolated func unmarkText() {
+    MainActor.assumeIsolated {
+      if markedText.length > 0 {
+        markedText.mutableString.setString("")
+        syncPreedit()
+      }
     }
   }
 
-  func validAttributesForMarkedText() -> [NSAttributedString.Key] {
-    []
+  nonisolated func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+    MainActor.assumeIsolated { [] }
   }
 
-  func attributedSubstring(
+  nonisolated func attributedSubstring(
     forProposedRange range: NSRange,
     actualRange: NSRangePointer?
   ) -> NSAttributedString? {
-    guard let surface else { return nil }
-    guard range.length > 0 else { return nil }
-    var text = ghostty_text_s()
-    guard ghostty_surface_read_selection(surface, &text) else { return nil }
-    defer { ghostty_surface_free_text(surface, &text) }
-    var attributes: [NSAttributedString.Key: Any] = [:]
-    if let fontRaw = ghostty_surface_quicklook_font(surface) {
-      let font = Unmanaged<CTFont>.fromOpaque(fontRaw)
-      attributes[.font] = font.takeUnretainedValue()
-      font.release()
+    // assumeIsolated requires a Sendable result; carry the non-Sendable
+    // attributed string out through an unchecked box.
+    final class Box: @unchecked Sendable {
+      var value: NSAttributedString?
     }
-    return NSAttributedString(string: String(cString: text.text), attributes: attributes)
-  }
-
-  func characterIndex(for point: NSPoint) -> Int {
-    0
-  }
-
-  func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-    guard let surface else {
-      return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
-    }
-    var caretX: Double = 0
-    var caretY: Double = 0
-    var width: Double = cellSize.width
-    var height: Double = cellSize.height
-    if range.length > 0, range != selectedRange() {
+    let box = Box()
+    MainActor.assumeIsolated {
+      guard let surface else { return }
+      guard range.length > 0 else { return }
       var text = ghostty_text_s()
-      if ghostty_surface_read_selection(surface, &text) {
-        caretX = text.tl_px_x - 2
-        caretY = text.tl_px_y + 2
-        ghostty_surface_free_text(surface, &text)
+      guard ghostty_surface_read_selection(surface, &text) else { return }
+      defer { ghostty_surface_free_text(surface, &text) }
+      var attributes: [NSAttributedString.Key: Any] = [:]
+      if let fontRaw = ghostty_surface_quicklook_font(surface) {
+        let font = Unmanaged<CTFont>.fromOpaque(fontRaw)
+        attributes[.font] = font.takeUnretainedValue()
+        font.release()
+      }
+      box.value = NSAttributedString(string: String(cString: text.text), attributes: attributes)
+    }
+    return box.value
+  }
+
+  nonisolated func characterIndex(for point: NSPoint) -> Int {
+    MainActor.assumeIsolated { 0 }
+  }
+
+  nonisolated func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+    MainActor.assumeIsolated {
+      guard let surface else {
+        return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
+      }
+      var caretX: Double = 0
+      var caretY: Double = 0
+      var width: Double = cellSize.width
+      var height: Double = cellSize.height
+      if range.length > 0, range != selectedRange() {
+        var text = ghostty_text_s()
+        if ghostty_surface_read_selection(surface, &text) {
+          caretX = text.tl_px_x - 2
+          caretY = text.tl_px_y + 2
+          ghostty_surface_free_text(surface, &text)
+        } else {
+          ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
+        }
       } else {
         ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
       }
-    } else {
-      ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
+      if range.length == 0, width > 0 {
+        width = 0
+        caretX += cellSize.width * Double(range.location + range.length)
+      }
+      let viewRect = NSRect(
+        x: caretX,
+        y: frame.size.height - caretY,
+        width: width,
+        height: max(height, cellSize.height)
+      )
+      let winRect = convert(viewRect, to: nil)
+      guard let window else { return winRect }
+      return window.convertToScreen(winRect)
     }
-    if range.length == 0, width > 0 {
-      width = 0
-      caretX += cellSize.width * Double(range.location + range.length)
-    }
-    let viewRect = NSRect(
-      x: caretX,
-      y: frame.size.height - caretY,
-      width: width,
-      height: max(height, cellSize.height)
-    )
-    let winRect = convert(viewRect, to: nil)
-    guard let window else { return winRect }
-    return window.convertToScreen(winRect)
   }
 
-  func insertText(_ string: Any, replacementRange: NSRange) {
-    guard NSApp.currentEvent != nil else { return }
-    guard let surface else { return }
-    var chars = ""
+  nonisolated func insertText(_ string: Any, replacementRange: NSRange) {
+    // Unbox to a Sendable String before crossing into the main actor so the
+    // signature matches NSTextInputClient's non-sending `Any` parameter.
+    let chars: String
     switch string {
     case let attributedText as NSAttributedString:
       chars = attributedText.string
@@ -1915,16 +1960,20 @@ extension GhosttySurfaceView: NSTextInputClient {
     default:
       return
     }
-    unmarkText()
-    if var acc = keyTextAccumulator {
-      acc.append(chars)
-      keyTextAccumulator = acc
-      return
-    }
-    let len = chars.utf8CString.count
-    if len == 0 { return }
-    chars.withCString { ptr in
-      ghostty_surface_text(surface, ptr, UInt(len - 1))
+    MainActor.assumeIsolated {
+      guard NSApp.currentEvent != nil else { return }
+      guard let surface else { return }
+      unmarkText()
+      if var acc = keyTextAccumulator {
+        acc.append(chars)
+        keyTextAccumulator = acc
+        return
+      }
+      let len = chars.utf8CString.count
+      if len == 0 { return }
+      chars.withCString { ptr in
+        ghostty_surface_text(surface, ptr, UInt(len - 1))
+      }
     }
   }
 }
@@ -1951,14 +2000,16 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     return super.validRequestor(forSendType: sendType, returnType: returnType)
   }
 
-  func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
-    guard let surface else { return false }
-    var text = ghostty_text_s()
-    guard ghostty_surface_read_selection(surface, &text) else { return false }
-    defer { ghostty_surface_free_text(surface, &text) }
-    pboard.declareTypes([.string], owner: nil)
-    pboard.setString(String(cString: text.text), forType: .string)
-    return true
+  nonisolated func writeSelection(to pboard: sending NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+    MainActor.assumeIsolated {
+      guard let surface else { return false }
+      var text = ghostty_text_s()
+      guard ghostty_surface_read_selection(surface, &text) else { return false }
+      defer { ghostty_surface_free_text(surface, &text) }
+      pboard.declareTypes([.string], owner: nil)
+      pboard.setString(String(cString: text.text), forType: .string)
+      return true
+    }
   }
 
   /// Sends raw text directly to the terminal PTY, bypassing the text input system.
@@ -1974,14 +2025,16 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     }
   }
 
-  func readSelection(from pboard: NSPasteboard) -> Bool {
-    guard let str = pboard.getOpinionatedStringContents() else { return false }
-    let len = str.utf8CString.count
-    if len == 0 { return true }
-    str.withCString { ptr in
-      ghostty_surface_text(surface, ptr, UInt(len - 1))
+  nonisolated func readSelection(from pboard: sending NSPasteboard) -> Bool {
+    MainActor.assumeIsolated {
+      guard let str = pboard.getOpinionatedStringContents() else { return false }
+      let len = str.utf8CString.count
+      if len == 0 { return true }
+      str.withCString { ptr in
+        ghostty_surface_text(surface, ptr, UInt(len - 1))
+      }
+      return true
     }
-    return true
   }
 }
 
@@ -2089,8 +2142,10 @@ final class GhosttySurfaceScrollView: NSView {
     fatalError("init(coder:) is not supported")
   }
 
-  isolated deinit {
-    observers.forEach { NotificationCenter.default.removeObserver($0) }
+  deinit {
+    MainActor.assumeIsolated {
+      observers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
   }
 
   override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }

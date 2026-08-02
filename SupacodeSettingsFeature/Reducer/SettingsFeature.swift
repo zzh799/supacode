@@ -354,7 +354,9 @@ public struct SettingsFeature {
         state.syncGlobalDefaults(from: state.globalSettings)
         return .merge(
           persist(state),
-          shouldPreview ? .run { _ in await notificationSoundClient.play(sound) } : .none
+          shouldPreview ? .run { [notificationSoundClient] _ in
+            await notificationSoundClient.play(sound)
+          } : .none
         )
 
       case .binding:
@@ -687,7 +689,7 @@ public struct SettingsFeature {
 
       case .alert(.presented(.openSystemNotificationSettings)):
         state.alert = nil
-        return .run { _ in
+        return .run { [systemNotificationClient] _ in
           await systemNotificationClient.openSettings()
         }
 

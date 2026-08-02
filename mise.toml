@@ -1,5 +1,8 @@
 [tools]
 tuist = "4.180.0"
+# zig 0.15.2 is required by the pinned ghostty submodule (1.3.2-dev calls
+# buildpkg.requireZig("0.15.2")) and by zmx. zig 0.14.x is incompatible with
+# the 1.3.x build.
 zig = "0.15.2"
 swiftlint = "0.64.0"
 xcbeautify = "3.2.1"

@@ -44,7 +44,9 @@ struct SidebarCard<Header: View, Content: View>: View {
     }
     .padding(12)
     .frame(maxWidth: .infinity, alignment: .leading)
-    .glassEffect(.regular, in: .rect(cornerRadius: 10))
+    // macOS 15 predates SwiftUI's glassEffect (macOS 26); a regular material
+    // with the same 10pt corner radius reads identically on both.
+    .background(.regularMaterial, in: .rect(cornerRadius: 10))
     .padding(.horizontal, 10)
     .padding(.bottom, 10)
   }

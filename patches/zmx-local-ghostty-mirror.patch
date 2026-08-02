@@ -1,0 +1,13 @@
+diff --git a/build.zig.zon b/build.zig.zon
+index c7baaed..a423642 100644
+--- a/build.zig.zon
++++ b/build.zig.zon
+@@ -5,7 +5,7 @@
+     .minimum_zig_version = "0.15.2",
+     .dependencies = .{
+         .ghostty = .{
+-            .url = "git+https://github.com/ghostty-org/ghostty.git?ref=HEAD#c74f6d56d1feef473033057bc0ff7e3f00cf6421",
++            .url = "git+http://127.0.0.1:8765/ghostty-upstream.git?ref=HEAD#c74f6d56d1feef473033057bc0ff7e3f00cf6421",
+             .hash = "ghostty-1.3.2-dev-5UdBC8HuDgWFQtz8pKQ-0HH6z0Cb_PKbI0R7AunQhdDF",
+         },
+     },

@@ -293,14 +293,11 @@ private struct MenuBarRowHighlight: View {
   let isHighlighted: Bool
 
   var body: some View {
-    // A row in the middle of the panel is far from its corners, so concentricity
-    // alone would round it to nothing: the floor is what actually shows.
-    ConcentricRectangle(
-      corners: .concentric(minimum: .fixed(MenuBarMetrics.highlightCornerRadius)),
-      isUniform: true
-    )
-    .fill(isHighlighted ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
-    .padding(.horizontal, MenuBarMetrics.highlightInset)
+    // macOS 26's `ConcentricRectangle` (Liquid Glass corners) isn't available
+    // in the macOS 15 SDK this project targets, so use a plain rounded rect.
+    RoundedRectangle(cornerRadius: MenuBarMetrics.highlightCornerRadius)
+      .fill(isHighlighted ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.clear))
+      .padding(.horizontal, MenuBarMetrics.highlightInset)
   }
 }
 

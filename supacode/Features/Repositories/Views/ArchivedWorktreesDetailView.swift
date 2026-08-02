@@ -37,43 +37,15 @@ struct ArchivedWorktreesDetailView: View {
     } else {
       List(selection: $selectedArchivedWorktreeIDs) {
         ForEach(Array(groups.enumerated()), id: \.element.repository.id) { index, group in
-          Section {
-            if !collapsedRepositoryIDs.contains(group.repository.id) {
-              ForEach(group.worktrees, id: \.id) { worktree in
-                ArchivedWorktreeRowView(
-                  worktree: worktree,
-                  pullRequest: store.state.sidebarItems[id: worktree.id]?.pullRequest,
-                  customTitle: store.state.sidebarItems[id: worktree.id]?.customTitle,
-                  customTint: store.state.sidebarItems[id: worktree.id]?.customTint,
-                  onUnarchive: {
-                    store.send(.unarchiveWorktree(worktree.id))
-                  },
-                  onDelete: {
-                    store.send(
-                      .requestDeleteSidebarItems([
-                        RepositoriesFeature.DeleteWorktreeTarget(
-                          worktreeID: worktree.id,
-                          repositoryID: group.repository.id
-                        )
-                      ])
-                    )
-                  }
-                )
-                .tag(worktree.id)
-                .typeSelectEquivalent("")
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-              }
-            }
-          } header: {
-            ArchivedWorktreeSectionHeader(
-              name: group.repository.name,
-              worktreeCount: group.worktrees.count,
-              isCollapsed: collapsedRepositoryIDs.contains(group.repository.id),
-              showsTopSeparator: index > 0,
-              onToggle: { toggleSection(group.repository.id) }
-            )
-          }
+          ArchivedWorktreeSection(
+            repositoryID: group.repository.id,
+            name: group.repository.name,
+            worktrees: group.worktrees,
+            isCollapsed: collapsedRepositoryIDs.contains(group.repository.id),
+            showsTopSeparator: index > 0,
+            store: store,
+            onToggle: { toggleSection(group.repository.id) }
+          )
         }
       }
       .listStyle(.sidebar)
@@ -120,6 +92,60 @@ struct ArchivedWorktreesDetailView: View {
       } else {
         collapsedRepositoryIDs.insert(repositoryID)
       }
+    }
+  }
+}
+
+/// One repository's archived rows under its header. Factored out of the deeply
+/// nested `List` builder: Swift 6.1's overload resolution regresses to
+/// `ChartContentBuilder` when `ForEach`+`Section` nest too deeply inside a
+/// `List`, so each level now stays in its own view builder.
+private struct ArchivedWorktreeSection: View {
+  let repositoryID: Repository.ID
+  let name: String
+  let worktrees: [Worktree]
+  let isCollapsed: Bool
+  let showsTopSeparator: Bool
+  let store: StoreOf<RepositoriesFeature>
+  let onToggle: () -> Void
+
+  var body: some View {
+    Section {
+      if !isCollapsed {
+        ForEach(worktrees, id: \.id) { worktree in
+          ArchivedWorktreeRowView(
+            worktree: worktree,
+            pullRequest: store.state.sidebarItems[id: worktree.id]?.pullRequest,
+            customTitle: store.state.sidebarItems[id: worktree.id]?.customTitle,
+            customTint: store.state.sidebarItems[id: worktree.id]?.customTint,
+            onUnarchive: {
+              store.send(.unarchiveWorktree(worktree.id))
+            },
+            onDelete: {
+              store.send(
+                .requestDeleteSidebarItems([
+                  RepositoriesFeature.DeleteWorktreeTarget(
+                    worktreeID: worktree.id,
+                    repositoryID: repositoryID
+                  )
+                ])
+              )
+            }
+          )
+          .tag(worktree.id)
+          .typeSelectEquivalent("")
+          .listRowInsets(EdgeInsets())
+          .listRowSeparator(.hidden)
+        }
+      }
+    } header: {
+      ArchivedWorktreeSectionHeader(
+        name: name,
+        worktreeCount: worktrees.count,
+        isCollapsed: isCollapsed,
+        showsTopSeparator: showsTopSeparator,
+        onToggle: onToggle
+      )
     }
   }
 }

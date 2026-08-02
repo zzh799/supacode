@@ -99,9 +99,12 @@ final class ZmxSessionWatcher: ZmxSessionWatching {
     thread = nil
   }
 
-  isolated deinit {
+  deinit {
     guard !stopped.value else { return }
-    stop()
+    // Set the stop flag so the reader thread exits at its next checkpoint.
+    // The Thread is non-Sendable, so we don't touch it here; it is released
+    // automatically when this object is deallocated.
+    stopped.setValue(true)
   }
 
   // MARK: - Reader thread (nonisolated).
@@ -388,7 +391,12 @@ final class ZmxSessionWatcherRegistry {
     watchers.removeAll()
   }
 
-  isolated deinit { stopAll() }
+  deinit {
+    // The dictionary is non-Sendable, so we can't touch it from this
+    // nonisolated deinit. It is released automatically when this object is
+    // deallocated; dropping it releases each watcher, whose own deinit flips
+    // its stop flag (stop() is main-actor isolated and can't run here).
+  }
 
   private func startWatcher(for surfaceID: UUID) {
     let socketPath = "\(socketDirectory)/\(ZmxSessionID.make(surfaceID: surfaceID))"

@@ -187,7 +187,7 @@ final class WorktreeTerminalManager {
     configureSocketServer(resolvedServer)
   }
 
-  isolated deinit {
+  deinit {
     for task in pendingIdleHookEvents.values { task.cancel() }
     for task in layoutDirtyTasks.values { task.cancel() }
     for task in layoutFlushTasks.values { task.cancel() }

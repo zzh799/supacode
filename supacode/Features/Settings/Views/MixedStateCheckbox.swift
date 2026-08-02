@@ -12,6 +12,9 @@ struct MixedStateCheckbox: NSViewRepresentable {
   let state: CheckboxState
   let onToggle: (Bool) -> Void
 
+  // `NSViewRepresentable` is a `@MainActor` protocol in the macOS 15 SDK, so
+  // these witnesses are implicitly main-actor isolated and can touch `NSButton`
+  // and `Coordinator` directly without `assumeIsolated`.
   func makeNSView(context: Context) -> NSButton {
     let button = NSButton(
       checkboxWithTitle: "", target: context.coordinator, action: #selector(Coordinator.toggled(_:)))
@@ -47,9 +50,13 @@ struct MixedStateCheckbox: NSViewRepresentable {
     }
 
     @objc func toggled(_ sender: NSButton) {
-      // Clicking mixed or off → on; clicking on → off.
-      let newEnabled = sender.state != .off
-      onToggle(newEnabled)
+      // NSButton actions arrive on the main thread; hop the actor for the
+      // `@MainActor` `NSButton.state` access.
+      MainActor.assumeIsolated {
+        // Clicking mixed or off → on; clicking on → off.
+        let newEnabled = sender.state != .off
+        onToggle(newEnabled)
+      }
     }
   }
 }

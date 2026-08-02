@@ -15,6 +15,9 @@ ghostty_dir="${srcroot}/ThirdParty/ghostty"
 ghostty_submodule_path="${ghostty_dir#"${repo_root}/"}"
 ghostty_build_root="${srcroot}/.build/ghostty"
 ghostty_local_cache_dir="${ghostty_build_root}/.zig-cache"
+# Zig 0.15.2 (required by the pinned ghostty 1.3.2-dev) uses a different global
+# cache layout than Zig 0.14. Keep the cache under our build root so ghostty's
+# bootstrap and `mise` don't collide with other tools.
 ghostty_global_cache_dir="${ghostty_build_root}/.zig-global-cache"
 ghostty_fingerprint_path="${ghostty_build_root}/fingerprint"
 ghostty_legacy_prefix_path="${ghostty_dir}/zig-out"
@@ -36,7 +39,7 @@ print_fingerprint() {
       shasum -a 256 "${script_path}" | awk '{print $1}'
       shasum -a 256 "${srcroot}/mise.toml" | awk '{print $1}'
       # The patches are applied at build time, so an edited patch must bust the cache.
-      for patch in "${ghostty_patches_dir}"/*.patch; do
+      for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
         [ -e "${patch}" ] || continue
         basename "${patch}"
         shasum -a 256 "${patch}" | awk '{print $1}'
@@ -96,7 +99,7 @@ reset_ghostty_patch_files() {
 apply_ghostty_patches() {
   [ -d "${ghostty_patches_dir}" ] || return 0
   local patch
-  for patch in "${ghostty_patches_dir}"/*.patch; do
+  for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
     [ -e "${patch}" ] || continue
     if git -C "${ghostty_dir}" apply --reverse --check "${patch}" 2>/dev/null; then
       continue # already fully applied
@@ -120,7 +123,7 @@ apply_ghostty_patches() {
 revert_ghostty_patches() {
   [ -d "${ghostty_patches_dir}" ] || return 0
   local patch
-  for patch in "${ghostty_patches_dir}"/*.patch; do
+  for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
     [ -e "${patch}" ] || continue
     # Prefer a clean reverse-apply; fall back to resetting just the patched files.
     # The fallback also guards against `set -e` aborting the trap mid-revert if the
@@ -176,7 +179,14 @@ if [ -f "${ghostty_fingerprint_path}" ] &&
 fi
 
 cd "${ghostty_dir}"
-mise exec -- zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Dsentry=false --prefix "${ghostty_build_root}" --cache-dir "${ghostty_local_cache_dir}" --global-cache-dir "${ghostty_global_cache_dir}"
+# zig 0.15.2 is pinned via mise.toml (ghostty 1.3.2-dev requires 0.15.2).
+# -Demit-themes=false: ghostty-themes downloads from github.com which is
+#   unreachable in this network; the themes bundle is only needed for the
+#   standalone macOS app, not for the GhosttyKit xcframework.
+# -Demit-macos-app=false: we only consume the xcframework; the embedded
+#   xcodebuild of the Ghostty app bundle is not needed (and can fail against
+#   newer Xcode SDKs).
+mise exec zig@0.15.2 -- zig build -Doptimize=ReleaseFast -Demit-xcframework=true -Demit-macos-app=false -Demit-themes=false -Dsentry=false --prefix "${ghostty_build_root}" --cache-dir "${ghostty_local_cache_dir}" --global-cache-dir "${ghostty_global_cache_dir}"
 rsync -a --delete "${ghostty_dir}/macos/GhosttyKit.xcframework/" "${xcframework_path}/"
 prepare_xcframework
 printf '%s\n' "${fingerprint}" > "${ghostty_fingerprint_path}"

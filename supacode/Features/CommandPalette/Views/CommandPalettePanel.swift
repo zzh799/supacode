@@ -141,11 +141,23 @@ final class CommandPalettePanelHostView: NSView {
     // inset the content via the safe area, leaving a gap above the search field.
     hostingView.safeAreaRegions = []
 
-    // Tahoe liquid glass is the panel's only background. The panel, the hosting
-    // view, and the SwiftUI card are all transparent; the titled window applies
-    // the corner radius and clips to it, so the glass needs no radius of its own.
-    let glass = NSGlassEffectView()
-    glass.contentView = hostingView
+    // Tahoe liquid glass (NSGlassEffectView) is macOS 26-only; the macOS 15
+    // target uses a HUD-material visual effect view as the translucent backdrop
+    // instead. The panel, the hosting view, and the SwiftUI card are all
+    // transparent; the titled window applies the corner radius and clips to it,
+    // so the glass needs no radius of its own.
+    let glass = NSVisualEffectView()
+    glass.material = .hudWindow
+    glass.blendingMode = .behindWindow
+    glass.state = .active
+    glass.addSubview(hostingView)
+    hostingView.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      hostingView.leadingAnchor.constraint(equalTo: glass.leadingAnchor),
+      hostingView.trailingAnchor.constraint(equalTo: glass.trailingAnchor),
+      hostingView.topAnchor.constraint(equalTo: glass.topAnchor),
+      hostingView.bottomAnchor.constraint(equalTo: glass.bottomAnchor),
+    ])
 
     panel.contentView = glass
     self.hostingView = hostingView

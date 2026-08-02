@@ -125,7 +125,11 @@ struct SidebarBottomCardView: View {
     case highlightRelevantOnboarding
     case nestedWorktreesOnboarding
 
-    static let transition: AnyTransition = .move(edge: .bottom).combined(with: .opacity)
+    // Computed (not stored): `AnyTransition` isn't Sendable, and Swift 6
+    // requires static stored properties to be.
+    static var transition: AnyTransition {
+      .move(edge: .bottom).combined(with: .opacity)
+    }
 
     /// Per-card visibility modes feeding priority resolution, grouped so the
     /// resolver stays under the parameter-count limit as cards are added.

@@ -171,7 +171,7 @@ public nonisolated enum AppShortcutID: Codable, Hashable, Sendable, CodingKeyRep
 
 private nonisolated let shortcutLogger = SupaLogger("Shortcuts")
 
-public struct AppShortcut: Identifiable {
+public struct AppShortcut: Identifiable, Sendable {
   public let id: AppShortcutID
   public let keyEquivalent: KeyEquivalent
   public let modifiers: EventModifiers
@@ -342,7 +342,7 @@ public enum AppShortcutCategory: String, CaseIterable, Sendable {
   }
 }
 
-public struct AppShortcutGroup: Identifiable {
+public struct AppShortcutGroup: Identifiable, Sendable {
   public let category: AppShortcutCategory
   public let shortcuts: [AppShortcut]
 

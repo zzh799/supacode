@@ -103,7 +103,11 @@ final class WindowFocusObserverNSView: NSView {
     observers.removeAll()
   }
 
-  isolated deinit {
-    clearObservers()
+  deinit {
+    let center = NotificationCenter.default
+    for observer in observers {
+      center.removeObserver(observer)
+    }
+    observers.removeAll()
   }
 }

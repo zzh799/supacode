@@ -20,8 +20,7 @@ struct FailedRepositoryRow: View {
         .accessibilityLabel("Repository unavailable")
     }
     .labelStyle(.verticallyCentered)
-    .listRowInsets(.trailing, 4)
-    .listRowInsets(.vertical, 6)
+    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 4))
     .contextMenu {
       Button("Copy as Pathname", systemImage: "doc.on.doc") {
         NSPasteboard.general.clearContents()
@@ -60,8 +59,7 @@ struct EnvironmentBlockedRepositoryRow: View {
         .accessibilityLabel("Git unavailable")
     }
     .labelStyle(.verticallyCentered)
-    .listRowInsets(.trailing, 4)
-    .listRowInsets(.vertical, 6)
+    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 4))
     .help(
       "Git is unavailable right now, so this repository's worktrees can't be listed. "
         + "See the banner below to restore it."

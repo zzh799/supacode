@@ -13,8 +13,11 @@ final class GhosttyRuntime {
   /// dereferencing the raw userdata/app pointer would be use-after-free;
   /// every resolution validates membership first. Registered in init,
   /// removed in deinit.
-  private static var liveUserdataBits: Set<UInt> = []
-  private static var liveAppBits: Set<UInt> = []
+  // Teardown runs from a nonisolated deinit, so these live registries can't be
+  // main-actor isolated. Access is rare (init / deinit / C-callback lookup), so
+  // the unsynchronized sets are acceptable here.
+  private nonisolated(unsafe) static var liveUserdataBits: Set<UInt> = []
+  private nonisolated(unsafe) static var liveAppBits: Set<UInt> = []
 
   final class SurfaceReference {
     let surface: ghostty_surface_t
@@ -123,7 +126,7 @@ final class GhosttyRuntime {
     setColorScheme(initialColorScheme ?? Self.resolvedLaunchColorScheme())
   }
 
-  isolated deinit {
+  deinit {
     Self.liveUserdataBits.remove(UInt(bitPattern: Unmanaged.passUnretained(self).toOpaque()))
     let center = NotificationCenter.default
     for observer in observers {
@@ -467,7 +470,9 @@ final class GhosttyRuntime {
     guard target.tag == GHOSTTY_TARGET_SURFACE else { return false }
     guard let surface = target.target.surface else { return false }
     guard let bridge = surfaceBridge(fromSurface: surface) else { return false }
-    return bridge.handleAction(target: target, action: action)
+    return MainActor.assumeIsolated {
+      bridge.handleAction(target: target, action: action)
+    }
   }
 
   private static func readClipboard(
@@ -477,16 +482,17 @@ final class GhosttyRuntime {
   ) -> Bool {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
-      return false
+    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return false }
+    return MainActor.assumeIsolated {
+      guard let surface = bridge.surface else { return false }
+      guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
+        return false
+      }
+      value.withCString { ptr in
+        ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
+      }
+      return true
     }
-    guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
-      return false
-    }
-    value.withCString { ptr in
-      ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
-    }
-    return true
   }
 
   private static func confirmReadClipboard(
@@ -498,11 +504,12 @@ final class GhosttyRuntime {
     _ = request
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
-      return
-    }
-    value.withCString { ptr in
-      ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
+    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
+    MainActor.assumeIsolated {
+      guard let surface = bridge.surface else { return }
+      value.withCString { ptr in
+        ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
+      }
     }
   }
 
@@ -525,7 +532,9 @@ final class GhosttyRuntime {
   private static func closeSurface(userdataBits: UInt?, processAlive: Bool) {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
-    bridge.closeSurface(processAlive: processAlive)
+    MainActor.assumeIsolated {
+      bridge.closeSurface(processAlive: processAlive)
+    }
   }
 
   private func setConfig(_ config: ghostty_config_t) {
@@ -909,7 +918,7 @@ extension NSPasteboard {
     return result
   }
 
-  static var ghosttySelection: NSPasteboard = {
+  nonisolated(unsafe) static let ghosttySelection: NSPasteboard = {
     NSPasteboard(name: .init("com.mitchellh.ghostty.selection"))
   }()
 

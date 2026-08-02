@@ -1,6 +1,6 @@
 import Foundation
 
-public nonisolated enum SkillAgent: String, Equatable, Sendable, CaseIterable, Codable {
+public nonisolated enum SkillAgent: String, Hashable, Equatable, Sendable, CaseIterable, Codable {
   case antigravity
   case claude
   case codex

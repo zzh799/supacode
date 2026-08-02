@@ -297,8 +297,14 @@ private struct SidebarPathGroupHeaderRow: View {
       .contentShape(.interaction, .rect)
     }
     .buttonStyle(.plain)
-    .listRowInsets(.leading, CGFloat(depth) * SidebarNestLayout.indentStep)
-    .listRowInsets(.vertical, 6)
+    .listRowInsets(
+      EdgeInsets(
+        top: 6,
+        leading: CGFloat(depth) * SidebarNestLayout.indentStep,
+        bottom: 6,
+        trailing: 0
+      )
+    )
     .moveDisabled(true)
     .help(isCollapsed ? "Expand \(label)" : "Collapse \(label)")
     .accessibilityLabel("\(label) group, \(isCollapsed ? "collapsed" : "expanded")")
@@ -339,7 +345,9 @@ private struct SidebarPathGroupAggregatedIndicators: View {
 private struct SidebarPathGroupIndicatorsView: View, Equatable {
   let indicators: SidebarBranchNesting.GroupIndicators
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  // `View` is main-actor-isolated in Swift 6, so the `Equatable` witness must
+  // be `nonisolated` to satisfy the protocol's nonisolated requirement.
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.indicators == rhs.indicators
   }
 
@@ -366,7 +374,9 @@ private struct SidebarPathGroupStatusDotView: View, Equatable {
   let hasNotification: Bool
   @Environment(\.backgroundProminence) private var backgroundProminence
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  // `View` is main-actor-isolated in Swift 6, so the `Equatable` witness must
+  // be `nonisolated` to satisfy the protocol's nonisolated requirement.
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.runningScriptColors == rhs.runningScriptColors
       && lhs.hasNotification == rhs.hasNotification
   }
@@ -523,19 +533,23 @@ private struct SidebarItemBody: View {
     .disabled(isRepositoryRemoving && store.lifecycle != .idle)
     .contentShape(.dragPreview, .rect)
     .contentShape(.interaction, .rect)
-    .onDragSessionUpdated { session in
-      let draggedIDs = Set(session.draggedItemIDs(for: Worktree.ID.self))
-      let active: Bool
-      switch session.phase {
-      case .ended, .dataTransferCompleted:
-        active = false
-      default:
-        active = draggedIDs.contains(rowID)
-      }
-      if active != store.isDragging {
-        store.send(.dragSessionChanged(isDragging: active))
-      }
-    }
+    // macOS 26's `onDragSessionUpdated` (which flips `isDragging` while a row
+    // is being dragged to hide its pull-request info) doesn't exist in the
+    // macOS 15 SDK this project targets; on macOS 15 the PR info simply stays
+    // visible during a drag.
+    // .onDragSessionUpdated { session in
+    //   let draggedIDs = Set(session.draggedItemIDs(for: Worktree.ID.self))
+    //   let active: Bool
+    //   switch session.phase {
+    //   case .ended, .dataTransferCompleted:
+    //     active = false
+    //   default:
+    //     active = draggedIDs.contains(rowID)
+    //   }
+    //   if active != store.isDragging {
+    //     store.send(.dragSessionChanged(isDragging: active))
+    //   }
+    // }
   }
 }
 

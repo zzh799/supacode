@@ -466,26 +466,12 @@ private struct NotificationsInspectorContent: View {
         List {
           ForEach(groups) { repository in
             ForEach(repository.worktrees) { worktree in
-              Section {
-                ForEach(worktree.notifications) { notification in
-                  NotificationRow(
-                    notification: notification,
-                    worktreeID: worktree.id,
-                    onSelect: onSelectNotification
-                  )
-                }
-                // Unread whose notifications the cap pruned still needs a way
-                // back to the surface, so synthesize a row per orphaned surface.
-                ForEach(worktree.prunedUnseenSurfaces) { surface in
-                  PrunedNotificationRow(
-                    surface: surface,
-                    worktreeID: worktree.id,
-                    onSelect: onSelectSurface
-                  )
-                }
-              } header: {
-                NotificationWorktreeHeader(repository: repository, worktree: worktree)
-              }
+              WorktreeNotificationsSection(
+                repository: repository,
+                worktree: worktree,
+                onSelectNotification: onSelectNotification,
+                onSelectSurface: onSelectSurface
+              )
             }
           }
         }
@@ -493,6 +479,40 @@ private struct NotificationsInspectorContent: View {
         // Let the window's terminal background (set in WindowChromeApplier) show through.
         .scrollContentBackground(.hidden)
       }
+    }
+  }
+}
+
+/// One worktree's notification rows under its header. Factored out of the
+/// deeply nested `List` builder: Swift 6.1's overload resolution regresses to
+/// `ChartContentBuilder` when `ForEach`+`Section` nest too deeply inside a
+/// `List`, so each level now stays in its own view builder.
+private struct WorktreeNotificationsSection: View {
+  let repository: ToolbarNotificationRepositoryGroup
+  let worktree: ToolbarNotificationWorktreeGroup
+  let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+  let onSelectSurface: (Worktree.ID, UUID) -> Void
+
+  var body: some View {
+    Section {
+      ForEach(worktree.notifications) { notification in
+        NotificationRow(
+          notification: notification,
+          worktreeID: worktree.id,
+          onSelect: onSelectNotification
+        )
+      }
+      // Unread whose notifications the cap pruned still needs a way back to the
+      // surface, so synthesize a row per orphaned surface.
+      ForEach(worktree.prunedUnseenSurfaces) { surface in
+        PrunedNotificationRow(
+          surface: surface,
+          worktreeID: worktree.id,
+          onSelect: onSelectSurface
+        )
+      }
+    } header: {
+      NotificationWorktreeHeader(repository: repository, worktree: worktree)
     }
   }
 }

@@ -86,9 +86,14 @@ struct SidebarItemView: View {
       )
     }
     .labelStyle(.verticallyCentered)
-    .listRowInsets(.leading, CGFloat(nestDepth) * SidebarNestLayout.indentStep)
-    .listRowInsets(.trailing, 4)
-    .listRowInsets(.vertical, 6)
+    .listRowInsets(
+      EdgeInsets(
+        top: 6,
+        leading: CGFloat(nestDepth) * SidebarNestLayout.indentStep,
+        bottom: 6,
+        trailing: 4
+      )
+    )
   }
 }
 
@@ -277,7 +282,7 @@ private struct TitleView: View, Equatable {
   // `==` ignores @Environment; SwiftUI tracks env changes separately.
   @Environment(\.backgroundProminence) private var backgroundProminence
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.name == rhs.name
       && lhs.subtitle == rhs.subtitle
       && lhs.accent == rhs.accent
@@ -396,7 +401,7 @@ private struct IconContent: View, Equatable {
   // `==` ignores @Environment; SwiftUI tracks env changes separately.
   @Environment(\.backgroundProminence) private var backgroundProminence
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.isFolder == rhs.isFolder
       && lhs.isRemote == rhs.isRemote
       && lhs.isMissing == rhs.isMissing
@@ -613,7 +618,7 @@ private struct DiffStatsContent: View, Equatable {
   // `==` ignores @Environment; SwiftUI tracks env changes separately.
   @Environment(\.backgroundProminence) private var backgroundProminence
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.addedLines == rhs.addedLines && lhs.removedLines == rhs.removedLines
   }
 
@@ -639,7 +644,7 @@ private struct StatusIndicator: View, Equatable {
   @Environment(\.backgroundProminence) private var backgroundProminence
   @Environment(\.focusNotificationAction) private var focusNotificationAction: (WorktreeTerminalNotification) -> Void
 
-  static func == (lhs: Self, rhs: Self) -> Bool {
+  nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
     lhs.runningScriptColors == rhs.runningScriptColors
       && lhs.showsNotificationIndicator == rhs.showsNotificationIndicator
       && lhs.notifications == rhs.notifications

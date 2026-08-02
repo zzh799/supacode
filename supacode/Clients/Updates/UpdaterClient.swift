@@ -26,13 +26,18 @@ class SparkleUpdateDelegate: NSObject, SPUUpdaterDelegate {
 
 extension UpdaterClient: DependencyKey {
   static let liveValue: UpdaterClient = {
-    let delegate = SparkleUpdateDelegate()
-    let controller = SPUStandardUpdaterController(
-      startingUpdater: true,
-      updaterDelegate: delegate,
-      userDriverDelegate: nil
-    )
-    let updater = controller.updater
+    // Sparkle's types are @MainActor, so construction and property access must
+    // hop through assumeIsolated; the first live access happens during app
+    // startup on the main actor.
+    let delegate = MainActor.assumeIsolated { SparkleUpdateDelegate() }
+    let controller = MainActor.assumeIsolated {
+      SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: delegate,
+        userDriverDelegate: nil
+      )
+    }
+    let updater = MainActor.assumeIsolated { controller.updater }
     return UpdaterClient(
       configure: { checks, downloads, checkInBackground in
         _ = controller

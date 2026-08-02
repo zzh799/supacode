@@ -17,7 +17,10 @@ import SupacodeSettingsShared
 import SwiftUI
 
 private enum GhosttyCLI {
-  static let argv: [UnsafeMutablePointer<CChar>?] = {
+  // Initialized once with `strdup`'d C strings and only ever read afterwards
+  // (via `withUnsafeBufferPointer` when launching the ghostty runtime), so the
+  // non-`Sendable` pointer array is safe to share.
+  nonisolated(unsafe) static let argv: [UnsafeMutablePointer<CChar>?] = {
     @Shared(.settingsFile) var settingsFile
     let overrides = settingsFile.global.shortcutOverrides
     var args: [UnsafeMutablePointer<CChar>?] = []
