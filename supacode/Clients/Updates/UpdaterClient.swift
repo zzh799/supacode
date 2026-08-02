@@ -26,48 +26,43 @@ class SparkleUpdateDelegate: NSObject, SPUUpdaterDelegate {
 
 extension UpdaterClient: DependencyKey {
   static let liveValue: UpdaterClient = {
-    // Sparkle's types are @MainActor, so construction must happen on the main
-    // actor. The dependency can first be resolved on a background thread (TCA
-    // lazily evaluates `liveValue` on whichever thread first touches
-    // `@Dependency(\.updaterClient)`), and a bare `MainActor.assumeIsolated`
-    // would trap (EXC_BREAKPOINT) off the main actor. Hop to the main thread
-    // synchronously and construct exactly once.
-    @MainActor func build() -> UpdaterClient {
-      let delegate = SparkleUpdateDelegate()
-      let controller = SPUStandardUpdaterController(
-        startingUpdater: true,
-        updaterDelegate: delegate,
-        userDriverDelegate: nil
-      )
-      let updater = controller.updater
-      return UpdaterClient(
-        configure: { checks, downloads, checkInBackground in
-          _ = controller
-          updater.automaticallyChecksForUpdates = checks
-          updater.automaticallyDownloadsUpdates = downloads
-          if checkInBackground, checks {
-            updater.checkForUpdatesInBackground()
-          }
-        },
-        setUpdateChannel: { channel in
-          _ = controller
-          delegate.updateChannel = channel
-          updater.updateCheckInterval = channel == .tip ? 43200 : 259200
-          if updater.automaticallyChecksForUpdates {
-            updater.checkForUpdatesInBackground()
-          }
-        },
-        checkForUpdates: {
-          _ = controller
-          updater.checkForUpdates()
+    // Sparkle's types are @MainActor, and TCA evaluates `liveValue` lazily on
+    // whichever thread first touches `@Dependency(\.updaterClient)` — usually a
+    // background thread. Two constraints rule out the obvious approaches:
+    //
+    // 1. A bare `MainActor.assumeIsolated` off the main thread traps
+    //    (EXC_BREAKPOINT).
+    // 2. A synchronous `DispatchQueue.main.sync` hop here deadlocks startup:
+    //    TCA holds its dependency-cache lock while evaluating `liveValue`, so
+    //    if the main thread is concurrently resolving any other dependency
+    //    (e.g. `zmxClient` in `WorktreeTerminalManager.reapOrphanSessions`) it
+    //    waits on that same lock while we wait on the main thread.
+    //
+    // So `liveValue` returns a client whose `@MainActor` closures lazily build
+    // the Sparkle objects on the main actor on first use: no blocking while
+    // holding the cache lock, and no off-main construction of @MainActor types.
+    UpdaterClient(
+      configure: { checks, downloads, checkInBackground in
+        let updater = UpdaterRuntime.shared.updater
+        updater.automaticallyChecksForUpdates = checks
+        updater.automaticallyDownloadsUpdates = downloads
+        if checkInBackground, checks {
+          updater.checkForUpdatesInBackground()
         }
-      )
-    }
-    if Thread.isMainThread {
-      return MainActor.assumeIsolated { build() }
-    } else {
-      return DispatchQueue.main.sync { MainActor.assumeIsolated { build() } }
-    }
+      },
+      setUpdateChannel: { channel in
+        let runtime = UpdaterRuntime.shared
+        runtime.delegate.updateChannel = channel
+        let updater = runtime.updater
+        updater.updateCheckInterval = channel == .tip ? 43200 : 259200
+        if updater.automaticallyChecksForUpdates {
+          updater.checkForUpdatesInBackground()
+        }
+      },
+      checkForUpdates: {
+        UpdaterRuntime.shared.updater.checkForUpdates()
+      }
+    )
   }()
 
   static let testValue = UpdaterClient(
@@ -75,6 +70,25 @@ extension UpdaterClient: DependencyKey {
     setUpdateChannel: { _ in },
     checkForUpdates: {}
   )
+}
+
+/// Lazily owns the `@MainActor` Sparkle objects. The box itself carries no
+/// Sparkle state (so it can be created on any thread); the controller is built
+/// on the main actor when the first client method runs. Kept alive for the
+/// process lifetime by `shared`.
+@MainActor
+private final class UpdaterRuntime {
+  static let shared = UpdaterRuntime()
+
+  let delegate = SparkleUpdateDelegate()
+  lazy var controller = SPUStandardUpdaterController(
+    startingUpdater: true,
+    updaterDelegate: delegate,
+    userDriverDelegate: nil
+  )
+  var updater: SPUUpdater { controller.updater }
+
+  private init() {}
 }
 
 extension DependencyValues {

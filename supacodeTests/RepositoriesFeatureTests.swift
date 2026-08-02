@@ -84,6 +84,39 @@ struct RepositoriesFeatureTests {
     }
   }
 
+  @Test func loadPersistedRepositoriesDoesNotHangWhenWorktreeListingStalls() async {
+    // Regression for the "Hydrating caches…" startup hang: a `git`/`wt` call
+    // that never returns used to block the entire initial load forever, leaving
+    // `isInitialLoadComplete` false. The per-root timeout now bounds it and
+    // surfaces the root as a load failure instead of hanging.
+    let root = "/tmp/hanging-repo"
+    let store = TestStore(initialState: RepositoriesFeature.State()) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.sidebarStructureAutoRecompute = false
+      // Shrink the ceiling so the stalled listing is bounded quickly.
+      $0.repositoryLoadTimeout = 0.2
+      $0.repositoryPersistence.loadRoots = { [root] }
+      $0.gitClient.rootDirectoryExists = { _ in true }
+      $0.gitClient.isGitRepository = { _ in true }
+      $0.gitClient.worktrees = { _ in
+        // Never resumes: simulates a `git worktree list` / `wt ls` that stalls.
+        await withUnsafeContinuation { (_: UnsafeContinuation<[Worktree], Never>) in }
+      }
+    }
+
+    await store.send(.loadPersistedRepositories) {
+      $0.isRefreshingWorktrees = false
+      $0.alert = nil
+    }
+    await store.receive(\.gitEnvironmentChanged)
+    await store.receive(\.repositoriesLoaded) {
+      $0.isInitialLoadComplete = true
+      $0.reconcileSidebarForTesting()
+      #expect($0.loadFailuresByID.isEmpty == false)
+    }
+  }
+
   @Test func refreshWorktreesWithoutRootsStopsRefreshingImmediately() async {
     let store = TestStore(initialState: RepositoriesFeature.State()) {
       RepositoriesFeature()

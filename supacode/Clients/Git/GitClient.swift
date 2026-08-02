@@ -1196,8 +1196,31 @@ struct GitClient {
     currentDirectoryURL: URL?
   ) async throws -> String {
     let command = ([executableURL.path(percentEncoded: false)] + arguments).joined(separator: " ")
+    // Startup hydration shells out for `worktree_list` and `git_common_dir`;
+    // log those with timing so a "Hydrating caches…" stall can be traced to a
+    // specific subprocess. Everything else logs only when it crosses
+    // `slowSubprocessThreshold` to keep the stream quiet.
+    let logsTiming = operation == .worktreeList || operation == .gitCommonDir
+    let directory = currentDirectoryURL?.path(percentEncoded: false) ?? "?"
+    let clock = ContinuousClock()
+    let started = clock.now
+    if logsTiming {
+      gitLogger.debug("wt subprocess starting operation=\(operation.rawValue) dir=\(directory)")
+    }
     do {
-      return try await shell.run(executableURL, arguments, currentDirectoryURL).stdout
+      let output = try await shell.run(executableURL, arguments, currentDirectoryURL).stdout
+      let elapsed = started.duration(to: clock.now)
+      if logsTiming {
+        gitLogger.debug(
+          "wt subprocess finished operation=\(operation.rawValue) dir=\(directory) "
+            + "in \(Self.elapsedMilliseconds(elapsed))ms")
+      } else if elapsed >= Self.slowSubprocessThreshold {
+        gitLogger.warning(
+          "wt subprocess slow operation=\(operation.rawValue) dir=\(directory) "
+            + "took \(Self.elapsedMilliseconds(elapsed))ms (threshold "
+            + "\(Int(Self.slowSubprocessThreshold.components.seconds))s)")
+      }
+      return output
     } catch {
       guard shouldFallbackToLoginShell(error) else {
         throw wrapShellError(error, operation: operation, command: command)
@@ -1209,6 +1232,18 @@ struct GitClient {
         throw wrapShellError(error, operation: operation, command: command)
       }
     }
+  }
+
+  /// Subprocess ceiling (seconds) before a non-hydration git call is flagged in
+  /// the logs. Doesn't terminate anything — the loader's repository-load timeout
+  /// already does that — it just makes a stall visible in the log stream.
+  nonisolated static let slowSubprocessThreshold: Duration = .seconds(10)
+
+  /// Milliseconds for a `Duration`, for subprocess timing logs.
+  nonisolated static func elapsedMilliseconds(_ duration: Duration) -> Int {
+    let seconds = Double(duration.components.seconds)
+    let attoseconds = Double(duration.components.attoseconds) / 1e15
+    return Int(seconds * 1000 + attoseconds)
   }
 
   nonisolated private func runLoginShellProcess(

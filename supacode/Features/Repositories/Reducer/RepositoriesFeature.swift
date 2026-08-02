@@ -3160,11 +3160,13 @@ struct RepositoriesFeature {
       case .loadPersistedRepositories:
         state.alert = nil
         state.isRefreshingWorktrees = false
-        return .run { send in
+        @Dependency(\.repositoryLoadTimeout) var repositoryLoadTimeout
+        repositoriesLogger.debug("Loading persisted repositories…")
+        return .run { [repositoryLoadTimeout] send in
           let loadedPaths = await repositoryPersistence.loadRoots()
           let rootPaths = RepositoryPathNormalizer.normalize(loadedPaths)
           let roots = rootPaths.map { URL(fileURLWithPath: $0) }
-          let loadResult = await loadRepositoriesData(roots)
+          let loadResult = await loadRepositoriesData(roots, timeout: repositoryLoadTimeout)
           await send(.gitEnvironmentChanged(loadResult.environmentError))
           await send(
             .repositoriesLoaded(
@@ -4355,14 +4357,29 @@ struct RepositoriesFeature {
 
   private func loadRepositories(_ roots: [URL], animated: Bool = false) -> Effect<Action> {
     let gitClient = gitClient
-    return .run { [animated, roots] send in
+    @Dependency(\.repositoryLoadTimeout) var repositoryLoadTimeout
+    return .run { [animated, roots, repositoryLoadTimeout] send in
+      let clock = ContinuousClock()
+      let loadStarted = clock.now
+      repositoriesLogger.debug(
+        "Repository reload starting: \(roots.count) root(s): "
+          + roots.map(\.lastPathComponent).joined(separator: ", ")
+      )
       // Each reconcile shells out independently; parallel to keep load latency flat.
       await withTaskGroup(of: Void.self) { group in
         for root in roots {
           group.addTask { await gitClient.reconcileSupacodeLocks(root) }
         }
       }
-      let loadResult = await loadRepositoriesData(roots)
+      repositoriesLogger.debug(
+        "Supacode lock reconciliation finished for \(roots.count) root(s) in "
+          + "\(Self.millisecondsSince(loadStarted, clock: clock))ms"
+      )
+      let loadResult = await loadRepositoriesData(roots, timeout: repositoryLoadTimeout)
+      repositoriesLogger.debug(
+        "Repository reload finished in \(Self.millisecondsSince(loadStarted, clock: clock))ms: "
+          + "\(loadResult.repositories.count) loaded, \(loadResult.failures.count) failure(s)"
+      )
       await send(.gitEnvironmentChanged(loadResult.environmentError))
       await send(
         .repositoriesLoaded(
@@ -4492,38 +4509,47 @@ struct RepositoriesFeature {
     for root: URL,
     gitClient: GitClientDependency
   ) async -> WorktreesFetchResult {
+    let rootName = root.lastPathComponent
+    let rootPath = root.standardizedFileURL.path(percentEncoded: false)
+    repositoriesLogger.debug("Hydrating \(rootName): starting at \(rootPath)")
     // Check existence first so a removed / unmounted root surfaces a failure
     // row instead of being synthesized as an empty folder (a missing path makes
     // `gitClient.isGitRepository` return `false`, hiding the real problem).
     // Routed through the dependency so fake `/tmp/...` test paths can override
     // it.
     let exists = await gitClient.rootDirectoryExists(root)
+    repositoriesLogger.debug("Hydrating \(rootName): rootDirectoryExists=\(exists)")
     guard exists else {
+      repositoriesLogger.warning("Hydrating \(rootName): root directory not found at \(rootPath)")
       return WorktreesFetchResult(
         root: root,
         isGitRepository: false,
         worktrees: nil,
         errorMessage:
-          "Directory not found at \(root.standardizedFileURL.path(percentEncoded: false)). "
+          "Directory not found at \(rootPath). "
           + "It may have been moved or deleted."
       )
     }
     // Classify through the git client so tests can override without touching the
     // filesystem.
     let isGit = await gitClient.isGitRepository(root)
+    repositoriesLogger.debug("Hydrating \(rootName): isGitRepository=\(isGit)")
     guard isGit else {
+      repositoriesLogger.debug("Hydrating \(rootName): not a git repo; classifying as folder")
       return WorktreesFetchResult(
         root: root, isGitRepository: false, worktrees: [], errorMessage: nil)
     }
     do {
+      repositoriesLogger.debug("Hydrating \(rootName): fetching worktree listing…")
       let worktrees = try await gitClient.worktrees(root)
+      repositoriesLogger.debug("Hydrating \(rootName): loaded \(worktrees.count) worktree(s)")
       // A duplicate path (e.g. a broken inner worktree git resolves up to the
       // repo root, #616) must not take down the whole repo. Drop the repeat and
       // load the remaining worktrees instead of refusing the repository.
       if let duplicate = firstDuplicateWorktreeID(in: worktrees) {
         repositoriesLogger.warning(
           "Dropping duplicate worktree path \(duplicate.rawValue) in "
-            + "\(root.lastPathComponent); loading the remaining worktrees."
+            + "\(rootName); loading the remaining worktrees."
         )
       }
       return WorktreesFetchResult(
@@ -4536,6 +4562,8 @@ struct RepositoriesFeature {
       // Any git listing failure (blocked binary, transient error, or a real repo
       // problem). Report it as a failed git root and let the loader's
       // `git --version` probe decide, once, whether git itself is blocked.
+      repositoriesLogger.warning(
+        "Hydrating \(rootName): worktree listing failed: \(error.localizedDescription)")
       return WorktreesFetchResult(
         root: root,
         isGitRepository: true,
@@ -4543,6 +4571,91 @@ struct RepositoriesFeature {
         errorMessage: error.localizedDescription
       )
     }
+  }
+
+  /// Monotonic elapsed milliseconds since `start` (same `clock` instance), for
+  /// load-timing diagnostics. `ContinuousClock` is used rather than `Date` so
+  /// wall-clock changes can't skew the reported duration.
+  nonisolated private static func millisecondsSince(
+    _ start: ContinuousClock.Instant,
+    clock: ContinuousClock
+  ) -> Int {
+    let elapsed = start.duration(to: clock.now)
+    let seconds = Double(elapsed.components.seconds)
+    let attoseconds = Double(elapsed.components.attoseconds) / 1e15
+    return Int(seconds * 1000 + attoseconds)
+  }
+
+  // MARK: - Load timeout guard
+
+  /// Task-group race between the operation and a sleep that throws on expiry.
+  /// Whichever settles first wins; the loser is cancelled, which tears down any
+  /// hung child process via the shell client's termination handler. `seconds`
+  /// comes from `DependencyValues.repositoryLoadTimeout` so tests can shrink it.
+  nonisolated private static func withRepositoryLoadTimeout<T: Sendable>(
+    _ operation: @Sendable @escaping () async throws -> T,
+    seconds: Double
+  ) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+      let nanoseconds = UInt64(max(0, seconds) * 1_000_000_000)
+      group.addTask { try await operation() }
+      group.addTask {
+        try await Task.sleep(nanoseconds: nanoseconds)
+        throw RepositoryLoadTimeoutError()
+      }
+      do {
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+      } catch {
+        group.cancelAll()
+        throw error
+      }
+    }
+  }
+
+  /// Timeout-guarded variant of `worktreesFetchResult`. On expiry the root is
+  /// reported as a failed git root, so the loader's probe path treats it like
+  /// any other git failure instead of hanging the load. A stalled `git`/`wt`
+  /// subprocess (held lock file, slow/network-mounted volume, corrupt worktree
+  /// config) would otherwise block the whole `withTaskGroup` forever and strand
+  /// the app on the "Hydrating caches…" placeholder.
+  nonisolated private static func worktreesFetchResultWithTimeout(
+    for root: URL,
+    gitClient: GitClientDependency,
+    timeout: Double
+  ) async -> WorktreesFetchResult {
+    do {
+      return try await withRepositoryLoadTimeout(
+        { await Self.worktreesFetchResult(for: root, gitClient: gitClient) },
+        seconds: timeout
+      )
+    } catch {
+      repositoriesLogger.error(
+        "Hydrating \(root.lastPathComponent): timed out after \(timeout)s — "
+          + "a `git`/`wt` subprocess is stalled on this root."
+      )
+      return WorktreesFetchResult(
+        root: root,
+        isGitRepository: true,
+        worktrees: nil,
+        errorMessage:
+          "Timed out loading worktrees for \(root.lastPathComponent) after "
+          + "\(timeout) seconds."
+      )
+    }
+  }
+
+  /// Thrown by `withRepositoryLoadTimeout` when the sleep side wins the race.
+  nonisolated private struct RepositoryLoadTimeoutError: Error {}
+
+  /// Per-root ceiling (seconds) for the initial/full repository load. See
+  /// `worktreesFetchResultWithTimeout`; defaults to 30 so a single misbehaving
+  /// repo can't hang startup, but the load still bounds well under a refresh
+  /// cycle.
+  fileprivate enum RepositoryLoadTimeoutDependency: DependencyKey {
+    static let liveValue: Double = 30
+    static let testValue: Double = 30
   }
 
   /// A git root whose listing failed, held until the `git --version` probe
@@ -4561,12 +4674,21 @@ struct RepositoriesFeature {
     let environmentError: GitEnvironmentError?
   }
 
-  private func loadRepositoriesData(_ roots: [URL]) async -> RepositoriesLoadResult {
+  private func loadRepositoriesData(
+    _ roots: [URL],
+    timeout: Double = 30
+  ) async -> RepositoriesLoadResult {
+    let clock = ContinuousClock()
+    let loadStarted = clock.now
+    repositoriesLogger.debug(
+      "Repository load starting: \(roots.count) root(s): "
+        + roots.map(\.lastPathComponent).joined(separator: ", ")
+    )
     let fetchResults = await withTaskGroup(of: WorktreesFetchResult.self) { group in
       for root in roots {
         let gitClient = self.gitClient
         group.addTask {
-          await Self.worktreesFetchResult(for: root, gitClient: gitClient)
+          await Self.worktreesFetchResultWithTimeout(for: root, gitClient: gitClient, timeout: timeout)
         }
       }
 
@@ -4577,6 +4699,10 @@ struct RepositoriesFeature {
       }
       return resultsByRootID
     }
+    repositoriesLogger.debug(
+      "Repository load: all root fetches settled in "
+        + "\(Self.millisecondsSince(loadStarted, clock: clock))ms"
+    )
 
     var loaded: [Repository] = []
     var failures: [LoadFailure] = []
@@ -4586,10 +4712,16 @@ struct RepositoriesFeature {
     for root in roots {
       let normalizedRoot = root.standardizedFileURL
       let rootID = RepositoryID(normalizedRoot.path(percentEncoded: false))
-      guard let result = fetchResults[rootID] else { continue }
+      guard let result = fetchResults[rootID] else {
+        repositoriesLogger.warning(
+          "Repository load: no fetch result for \(root.lastPathComponent)")
+        continue
+      }
       let name = Repository.name(for: normalizedRoot)
       if result.isGitRepository {
         if let worktrees = result.worktrees {
+          repositoriesLogger.debug(
+            "Repository load: \(root.lastPathComponent) → \(worktrees.count) worktree(s)")
           let repository = Repository(
             id: rootID,
             rootURL: normalizedRoot,
@@ -4601,6 +4733,9 @@ struct RepositoriesFeature {
         } else {
           // A real block fails every git root, and we can't judge a repo broken
           // while git is down, so defer the verdict to the probe below.
+          repositoriesLogger.warning(
+            "Repository load: \(root.lastPathComponent) deferred git failure: "
+              + "\(result.errorMessage ?? "Unknown error")")
           deferredGitFailures.append(
             DeferredGitFailure(rootID: rootID, message: result.errorMessage ?? "Unknown error"))
         }
@@ -4609,6 +4744,8 @@ struct RepositoriesFeature {
         // the directory (missing / unmounted / unreadable).
         // Route through the same `LoadFailure` pipeline git
         // repos use so the sidebar shows the error row.
+        repositoriesLogger.warning(
+          "Repository load: \(root.lastPathComponent) failed: \(errorMessage)")
         failures.append(
           LoadFailure(rootID: rootID, message: errorMessage)
         )
@@ -4616,6 +4753,8 @@ struct RepositoriesFeature {
         // Folder repository: synthesize a single main-like worktree
         // so the existing sidebar selection + terminal plumbing keeps
         // working without new entity types.
+        repositoriesLogger.debug(
+          "Repository load: \(root.lastPathComponent) → folder repository")
         let synthetic = Worktree(
           id: Repository.folderWorktreeID(for: normalizedRoot),
           kind: .folder,
@@ -4644,13 +4783,27 @@ struct RepositoriesFeature {
     // working -> they were real repo problems and surface as failure rows.
     var environmentError: GitEnvironmentError?
     if !loaded.contains(where: \.isGitRepository) {
-      environmentError = await gitClient.checkGitEnvironment()
+      do {
+        environmentError = try await Self.withRepositoryLoadTimeout(
+          { await gitClient.checkGitEnvironment() },
+          seconds: timeout
+        )
+      } catch {
+        // `git --version` stalling means git is effectively unusable; surface
+        // the environment banner rather than letting the load hang.
+        environmentError = .developerToolsUnavailable
+      }
     }
     if environmentError == nil {
       for failure in deferredGitFailures {
         failures.append(LoadFailure(rootID: failure.rootID, message: failure.message))
       }
     }
+    repositoriesLogger.debug(
+      "Repository load finished in \(Self.millisecondsSince(loadStarted, clock: clock))ms: "
+        + "\(loaded.count) loaded, \(failures.count) failure(s), "
+        + "environmentError=\(String(describing: environmentError))"
+    )
     // Remote repositories are NOT resolved here: that SSH work runs
     // asynchronously after the load (`.resolveRemoteRepositories`) so an
     // unreachable host never blocks the initial sidebar. The `.repositoriesLoaded`
@@ -6404,5 +6557,15 @@ extension String {
   /// Returns the remote name if this ref starts with `<remote>/`, matched against known remotes.
   fileprivate nonisolated func matchingRemote(from remotes: [String]) -> String? {
     GitReferenceQueries.remotePrefixMatch(ref: self, remoteNames: remotes)?.remote
+  }
+}
+
+extension DependencyValues {
+  /// Per-root ceiling (seconds) for the initial/full repository load. A stalled
+  /// `git`/`wt` subprocess would otherwise hang startup on "Hydrating caches…".
+  /// Tests shrink this so a hung worktree listing is bounded quickly.
+  var repositoryLoadTimeout: Double {
+    get { self[RepositoriesFeature.RepositoryLoadTimeoutDependency.self] }
+    set { self[RepositoriesFeature.RepositoryLoadTimeoutDependency.self] = newValue }
   }
 }
