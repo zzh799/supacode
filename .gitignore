@@ -72,3 +72,4 @@ fastlane/test_output
 *.profraw
 .env
 .DS_Store
+/.workbuddy/memory
