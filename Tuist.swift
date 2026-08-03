@@ -1,7 +1,7 @@
 import ProjectDescription
 
 let tuist = Tuist(
-  fullHandle: "supabitapp/supacode",
+  fullHandle: "zzh799/supacode",
   project: .tuist(
     // Development targets macOS 15, whose toolchains start at Xcode 16. The
     // ghostty Zig build keeps its own stricter Xcode 26.3 check in
