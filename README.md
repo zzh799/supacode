@@ -2,6 +2,10 @@
 
 **A native macOS command center for running coding agents in parallel.**
 
+> **This fork is built for macOS 15 (Sequoia).** The upstream project requires macOS 26; this
+> fork lowers the minimum deployment target to macOS 15.0 so Sequoia Macs can run Supacode too —
+> same features and workflow, no OS upgrade needed.
+
 Run several coding agents side by side from one window: each task gets its own git worktree and
 its own real terminal. Sessions persist in the background, so quitting the app or dropping an SSH
 connection loses nothing.
@@ -70,7 +74,7 @@ you can bind an action to a hotkey or fire it from another app.
 
 ## Requirements
 
-- macOS 15.0+
+- macOS 15.0+ (this fork; upstream requires macOS 26+)
 - [mise](https://mise.jdx.dev/) for the pinned toolchain. Add `~/.local/bin` to your `PATH`.
 - git submodules: `git submodule update --init --recursive`
 - **Xcode 26.3** if you are on macOS 26.4+ (see [below](#building-on-macos-264-tahoe)).
