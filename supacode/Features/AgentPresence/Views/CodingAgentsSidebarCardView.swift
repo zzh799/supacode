@@ -90,11 +90,11 @@ private struct CodingAgentsCardBody: View {
       VStack(alignment: .leading, spacing: 2) {
         SidebarCardLabel(title: title, description: description)
         Button("Review in Settings") {
-          // Both calls are needed: `setSelection` routes the Settings
-          // view, `openWindow` brings it forward when it's already open
-          // on Developer (selection no-op wouldn't trigger the bridge).
+          // `setSelection` routes the Settings view; the presenter surfaces
+          // the already-open window or opens one when none exists, so a
+          // repeat click can't pile up duplicate settings windows.
           store.send(.settings(.setSelection(.developer)))
-          openWindow(id: WindowID.settings)
+          SettingsWindowPresenter.present(openWindow: openWindow)
         }
         .buttonStyle(.link)
         .font(.caption)

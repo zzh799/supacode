@@ -54,7 +54,9 @@ struct MenuBarNotificationsMenu: View {
       MenuBarActionRow(title: "Settings...") {
         dismissMenuBarExtra()
         store.send(.settings(.setSelection(.general)))
-        openWindow(id: WindowID.settings)
+        // Surface the already-open settings window (or open one when none
+        // exists) instead of spawning a fresh WindowGroup instance.
+        SettingsWindowPresenter.present(openWindow: openWindow)
         NSApplication.shared.activate()
       }
       MenuBarDivider()

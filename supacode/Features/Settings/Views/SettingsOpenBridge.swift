@@ -14,7 +14,7 @@ import SwiftUI
 /// — would pile up duplicate settings windows, so every call site goes through
 /// this instead of calling `openWindow` directly.
 @MainActor
-private enum SettingsWindowPresenter {
+enum SettingsWindowPresenter {
   static func present(openWindow: OpenWindowAction) {
     if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == WindowID.settings }) {
       if window.isMiniaturized { window.deminiaturize(nil) }
