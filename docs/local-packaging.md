@@ -7,11 +7,32 @@
 > 适用场景：在改完代码之后想用最新构建替换本机的 Supacode，又不想打 tag / 推送
 > 触发 release 流水线。
 
+## 使用方式：一条命令
+
+本文的全部步骤已经封装成 `scripts/install-local.sh`，在仓库根目录直接运行即可：
+
+```bash
+./scripts/install-local.sh
+```
+
+脚本会自动完成：前置检查 → 构建未签名 Release 归档 → 本地签名 → 验证签名 →
+替换 `/Applications` → 启动冒烟验证 → 恢复构建污染的 workspace 文件。
+
+支持选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `--no-build` | 不重新构建，直接复用 `build/supacode.xcarchive` 重新签名安装 |
+| `--no-launch` | 装完不启动 App（跳过启动验证） |
+| `--no-cleanup` | 不执行 `git checkout -- Tuist/Package.resolved supacode.json`（见下文收尾） |
+| `-h` / `--help` | 查看帮助 |
+
 ## 前置条件
 
-- `mise install` 已装好工具链；`make doctor` 无失败项
+- `mise install` 已装好工具链；`make doctor` 无失败项（脚本会先跑 `doctor.sh --quiet`
+  做同样的检查）
 - 子模块已初始化（`git submodule update --init --recursive`）
-- 本机 keychain 有可用的 codesigning identity：
+- 本机 keychain 有可用的 Apple Development codesigning identity：
 
 ```bash
 security find-identity -v -p codesigning
@@ -23,107 +44,36 @@ security find-identity -v -p codesigning
 > Apple Development 证书本地签名，**未公证（notarization）**，只保证本机能跑，
 > 不能分发给别人。对外分发仍必须走 CI/CD。
 
-## 步骤一：构建 Release 归档（不签名）
+## 脚本做了什么（对照手动流程）
 
-`make archive` 默认按 Manual + Developer ID 签名；传入
-`CODE_SIGNING_ALLOWED=NO` 跳过签名（签名在归档后手动补）：
+1. **构建 Release 归档（不签名）**：`make archive XCODEBUILD_FLAGS="CODE_SIGNING_ALLOWED=NO
+   CODE_SIGNING_REQUIRED=NO"`。`make archive` 原本按 Manual + Developer ID 签名，
+   本机没有 `APPLE_TEAM_ID` / `DEVELOPER_ID_IDENTITY_SHA`，必须用这个 flag 跳过，
+   否则归档失败。会重新生成 Release 配置的 workspace 并清空 DerivedData。
+   产物：`build/supacode.xcarchive/Products/Applications/supacode.app`。
+2. **本地签名**：取 keychain 里第一条 Apple Development identity 的 SHA，按
+   最深的嵌套代码先签、最后签主 App 的顺序签名，并给主 App 注入
+   `supacode/supacode.entitlements`（Release entitlements）。
+3. **验证签名**：`codesign --verify --deep --strict`；`spctl -a` 会被
+   rejected，这是预期（本地证书 + 未公证）。
+4. **替换 `/Applications`**：先退出正在运行的 supacode，再 `ditto` 拷入。
+5. **启动验证**：`open -a` 后确认进程存活。
+6. **收尾清理**：`git checkout -- Tuist/Package.resolved supacode.json`，
+   恢复 `tuist install` 与启动 App 造成的构建副作用。
 
-```bash
-make archive XCODEBUILD_FLAGS="CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO"
-```
+## 为什么签这些
 
-会重新生成 Release 配置的 workspace 并清空 DerivedData，首次编译较久。
-产物：`build/supacode.xcarchive/Products/Applications/supacode.app`。
+`.github/scripts/resign_exported_app.sh` 对 Frameworks/PlugIns/Resources/
+XPCServices/LoginItems 下所有 `*.app|*.appex|*.framework|*.xpc|*.dylib|可执行文件`
+从深到浅重新签名。但未签名归档没有可保留的 entitlement 元数据，所以主 App
+改用 `--entitlements` 显式注入。`Resources/git-wt/wt` 是 bash 脚本，不需要签
+（由主 App 的 seal 覆盖）。
 
-```bash
-APP="build/supacode.xcarchive/Products/Applications/supacode.app"
-plutil -p "$APP/Contents/Info.plist" | grep -E "CFBundleShortVersionString|CFBundleVersion"
-# 确认版本正确（本分支当前为 0.10.8 / 148）
-```
+## 注意
 
-## 步骤二：本地签名
-
-先用脚本打到最后签的 identity SHA：
-
-```bash
-IDENT="$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | awk '{print $2}')"
-echo "$IDENT"
-```
-
-签名顺序：最深的嵌套代码先签，最后签主 App。
-
-```bash
-set -e
-APP="build/supacode.xcarchive/Products/Applications/supacode.app"
-# 若上一次 codesign 中途失败留下 .cstemp 临时文件，先删掉
-find "$APP" -name "*.cstemp" -delete
-S="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
-codesign -f -s "$IDENT" -o runtime --timestamp "$S/Updater.app"
-codesign -f -s "$IDENT" -o runtime --timestamp "$S/XPCServices/Downloader.xpc"
-codesign -f -s "$IDENT" -o runtime --timestamp "$S/XPCServices/Installer.xpc"
-codesign -f -s "$IDENT" -o runtime --timestamp "$S/Autoupdate"
-codesign -f -s "$IDENT" -o runtime --timestamp "$APP/Contents/Resources/bin/supacode"
-codesign -f -s "$IDENT" -o runtime --timestamp "$APP/Contents/Resources/zmx/zmx"
-codesign -f -s "$IDENT" -o runtime --timestamp "$S/Sparkle"
-codesign -f -s "$IDENT" -o runtime --timestamp "$APP/Contents/Frameworks/Sparkle.framework"
-# 最后签主 App，带上 Release 的 entitlements（Debug 的是 supacodeDebug.entitlements）
-codesign -f -s "$IDENT" -o runtime --timestamp --entitlements supacode/supacode.entitlements "$APP"
-```
-
-> 为什么签这些：`.github/scripts/resign_exported_app.sh` 对
-> Frameworks/PlugIns/Resources/XPCServices/LoginItems 下所有
-> `*.app|*.appex|*.framework|*.xpc|*.dylib|可执行文件` 从深到浅重新签名。
-> 但未签名归档没有可保留的 entitlement 元数据，所以主 App 改用
-> `--entitlements` 显式注入。`Resources/git-wt/wt` 是 bash 脚本，
-> 不需要签（由主 App 的 seal 覆盖）。
-
-## 步骤三：验证签名
-
-```bash
-APP="build/supacode.xcarchive/Products/Applications/supacode.app"
-codesign --verify --deep --strict --verbose=2 "$APP"
-codesign -dv "$APP" 2>&1 | grep -E "TeamIdentifier|flags|Signed Time"
-# spctl -a 会被 rejected，这是预期：本地证书 + 未公证
-```
-
-## 步骤四：替换 /Applications
-
-```bash
-set -e
-APP="build/supacode.xcarchive/Products/Applications/supacode.app"
-DST="/Applications/supacode.app"
-# 若正在运行，先退出
-pgrep -x supacode >/dev/null && (osascript -e 'quit app "supacode"'; sleep 2) || true
-rm -rf "$DST"
-ditto "$APP" "$DST"
-plutil -p "$DST/Contents/Info.plist" | grep -E "CFBundleShortVersionString|CFBundleVersion"
-codesign --verify --deep --strict "$DST" && echo "verify OK"
-```
-
-## 步骤五：验证启动
-
-```bash
-open -a /Applications/supacode.app
-sleep 6
-pgrep -x supacode >/dev/null && echo "RUNNING OK"
-```
-
-## 收尾：清理构建副作用
-
-`tuist install` 会把 `Tuist/Package.resolved` 里的仓库地址规范化（去掉 `.git` 后缀）；
-启动 App 会改写 `supacode.json`（如 `openActionID`）。这两个都不是我们想要的改动，
-恢复后保持工作区干净。**不要 push tag、不要 `make bump-and-release`**：
-
-```bash
-git checkout -- Tuist/Package.resolved supacode.json
-git status --short   # 应为空
-```
-
-## 注意事项
-
-- `make archive` 用 Developer ID 签名（`make archive` 原目标依赖
-  `APPLE_TEAM_ID` / `DEVELOPER_ID_IDENTITY_SHA` 环境变量），本机没有这些变量，
-  所以必须传 `CODE_SIGNING_ALLOWED=NO` 跳过，否则归档失败。
-- 本机装好后：App 可以正常启动使用；但它没有公证，`spctl` 拒绝，
-  首次在其它 Mac 上复制过去打开时可能被 Gatekeeper 拦，需要右键“打开”。
+- `git checkout -- Tuist/Package.resolved supacode.json` 会丢弃这两个文件里的
+  未提交改动；如有想保留的改动，先跑 `--no-cleanup` 再手动恢复。
+- 装好后：App 可以正常启动使用；但它没有公证，`spctl` 拒绝，首次在其它 Mac 上
+  复制过去打开时可能被 Gatekeeper 拦，需要右键“打开”。
+- 不要 push tag、不要 `make bump-and-release`。
 - Sparkle 自动更新通道仍指向正式 release，本地装的不影响。
