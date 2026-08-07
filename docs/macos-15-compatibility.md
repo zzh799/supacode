@@ -13,6 +13,8 @@
 - `c8dd36c1` fix(startup): fix deadlock that strands app on "Hydrating caches…"
 - `8a40e8e9` / `004b545e` fix(settings): 设置窗口重复打开
 - `daf6efae` docs: highlight macOS 15 compatibility in README
+- `3fd51545` merge: integrate upstream/main (v0.10.8+)，重新引入 macOS 26 专属 API
+- `c0e241c9` fix: keep merged upstream code buildable on the macOS 15 SDK（上游合并后的兼容修复）
 
 ---
 
@@ -78,7 +80,9 @@ macOS 26 工具链宽松，同样的代码在 Swift 6.0 / macOS 15 SDK 下报严
    （见 AppFeature.swift 的 `terminalClient` 系列调用）。
 2. **`MainActor.assumeIsolated` 必须用括号形式**（`assumeIsolated({ ... })`）：
    在 `if`/`guard`/`AlertState {…}` 等表达式位置，尾随闭包会被外层调用抢走，
-   报 "extra trailing closure passed in call" 并级联类型错误。
+   报 "extra trailing closure passed in call" 并级联类型错误。上游合并后新加的
+   `renameSelectedTerminalTab` 分支就是 `guard` 里的实例：
+   `guard let tabID = MainActor.assumeIsolated({ terminalClient.selectedTabID(worktree.id) })`。
 3. **`assumeIsolated` 闭包是 `@Sendable`**：不能捕获 `inout state`，也不能捕获
    `@Shared` 包装器（报 "sending ... risks causing data races"）。读取前先把值拷到
    局部 `let`。
@@ -88,7 +92,9 @@ macOS 26 工具链宽松，同样的代码在 Swift 6.0 / macOS 15 SDK 下报严
    （supacodeApp.swift 的 `singleWindowScene`）。
 5. **NSViewRepresentable 见证**：macOS 15 SDK 中已是 `@MainActor`，把
    `MixedStateCheckbox.Coordinator` 标 `@MainActor` 并去掉多余的
-   `MainActor.assumeIsolated` 包裹（消除 "sending self" 数据竞争）。
+   `MainActor.assumeIsolated` 包裹（消除 "sending self" 数据竞争）。上游合并新增的
+   `FileExplorerRootPathControl.Coordinator` 同样标 `@MainActor`（其 `@objc` action
+   里读 `clickedPathItem`，在 macOS 15 SDK 是 main-actor 隔离的）。
 6. **多余的 `@MainActor` 要删**：`SidebarStructure.applyCacheRecomputes` 上多余的
    `@MainActor` 会让非隔离 `Reduce` 调用报错——`SidebarStructure` 是 `Sendable`
    结构体，其调用的 `recompute*IfChanged()` 均为非隔离 `mutating`。
