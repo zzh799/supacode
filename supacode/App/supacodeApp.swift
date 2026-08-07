@@ -164,6 +164,7 @@ struct SupacodeApp: App {
     if capturedLegacyRemotes != .unreadable {
       SidebarPersistenceMigrator.migrateIfNeeded()
       SidebarPersistenceMigrator.migrateRemoteIdentityIfNeeded(capturedLegacy: capturedLegacyRemotes)
+      SidebarPersistenceMigrator.migrateRemoteSlashIDsIfNeeded()
     }
     @Shared(.settingsFile) var settingsFile
     let initialSettings = settingsFile.global

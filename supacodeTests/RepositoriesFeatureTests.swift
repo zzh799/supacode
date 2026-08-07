@@ -1090,6 +1090,120 @@ struct RepositoriesFeatureTests {
     }
   }
 
+  @Test func promptedWorktreeBranchesLoadedResetsDeadSeededUpstream() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    var state = makeState(repositories: [repository])
+    state.worktreeCreationPrompt = WorktreeCreationPromptFeature.State(
+      repositoryID: repository.id,
+      repositoryRootURL: repository.rootURL,
+      repositoryName: repository.name,
+      automaticBaseRef: "origin/main",
+      defaultBranch: "main",
+      remoteNames: ["origin"],
+      branchMenu: nil,
+      branchName: "feature/new",
+      selectedBaseRef: nil,
+      selectedUpstream: .branch("origin/tpyo"),
+      fetchOrigin: true,
+      defaultWorktreeBaseDirectory: "/tmp/repo/.worktrees",
+      validationMessage: nil
+    )
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    let inventory = GitBranchInventory(
+      localBranches: ["main"],
+      remotes: [GitRemoteBranchGroup(name: "origin", branches: ["main"])]
+    )
+    await store.send(.promptedWorktreeBranchesLoaded(repositoryID: repository.id, inventory: inventory)) {
+      $0.worktreeCreationPrompt?.branchMenu = BaseRefBranchMenu(
+        inventory: inventory,
+        hoistedLocalBranch: "main"
+      )
+      $0.worktreeCreationPrompt?.selectedUpstream = .automatic
+    }
+  }
+
+  @Test func promptedWorktreeBranchesLoadedKeepsSeededUpstreamPresentInInventory() async {
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    var state = makeState(repositories: [repository])
+    state.worktreeCreationPrompt = WorktreeCreationPromptFeature.State(
+      repositoryID: repository.id,
+      repositoryRootURL: repository.rootURL,
+      repositoryName: repository.name,
+      automaticBaseRef: "origin/main",
+      defaultBranch: "main",
+      remoteNames: ["origin"],
+      branchMenu: nil,
+      branchName: "feature/new",
+      selectedBaseRef: nil,
+      selectedUpstream: .branch("origin/dev"),
+      fetchOrigin: true,
+      defaultWorktreeBaseDirectory: "/tmp/repo/.worktrees",
+      validationMessage: nil
+    )
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    let inventory = GitBranchInventory(
+      localBranches: ["main"],
+      remotes: [GitRemoteBranchGroup(name: "origin", branches: ["dev", "main"])]
+    )
+    await store.send(.promptedWorktreeBranchesLoaded(repositoryID: repository.id, inventory: inventory)) {
+      $0.worktreeCreationPrompt?.branchMenu = BaseRefBranchMenu(
+        inventory: inventory,
+        hoistedLocalBranch: "main"
+      )
+    }
+  }
+
+  @Test func promptedWorktreeBranchesLoadedKeepsQualifiedSeededUpstream() async {
+    // The inventory carries short names only, so a refs/-qualified upstream is
+    // exempt from reconciliation; the pre-flight validates it instead.
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    var state = makeState(repositories: [repository])
+    state.worktreeCreationPrompt = WorktreeCreationPromptFeature.State(
+      repositoryID: repository.id,
+      repositoryRootURL: repository.rootURL,
+      repositoryName: repository.name,
+      automaticBaseRef: "origin/main",
+      defaultBranch: "main",
+      remoteNames: ["origin"],
+      branchMenu: nil,
+      branchName: "feature/new",
+      selectedBaseRef: nil,
+      selectedUpstream: .branch("refs/heads/main"),
+      fetchOrigin: true,
+      defaultWorktreeBaseDirectory: "/tmp/repo/.worktrees",
+      validationMessage: nil
+    )
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    }
+
+    let inventory = GitBranchInventory(
+      localBranches: ["main"],
+      remotes: [GitRemoteBranchGroup(name: "origin", branches: ["main"])]
+    )
+    await store.send(.promptedWorktreeBranchesLoaded(repositoryID: repository.id, inventory: inventory)) {
+      $0.worktreeCreationPrompt?.branchMenu = BaseRefBranchMenu(
+        inventory: inventory,
+        hoistedLocalBranch: "main"
+      )
+    }
+  }
+
   @Test func promptedWorktreeBranchesLoadedKeepsBaseRefWhenInventoryEmpty() async {
     let repoRoot = "/tmp/repo"
     let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
@@ -1248,6 +1362,7 @@ struct RepositoriesFeatureTests {
               repositoryID: repository.id,
               branchName: "feature/new",
               baseRef: nil,
+              upstream: .automatic,
               fetchOrigin: true,
               placement: WorktreePlacementOverride(name: nil, path: nil),
               title: nil,
@@ -2947,6 +3062,189 @@ struct RepositoriesFeatureTests {
 
     #expect(store.state.sidebar.sections[repository.id]?.buckets[.pinned]?.items[createdWorktree.id] != nil)
     #expect(store.state.sidebarItems[id: createdWorktree.id]?.isPinned == true)
+  }
+
+  @Test(.dependencies) func upstreamSurvivesParkedPromptRoundTrip() async {
+    // A branchless CLI / deeplink upstream parks on `ParkedWorktreeRequest` and
+    // seeds the prompt, so the flag survives the interactive path.
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    let createdWorktree = makeWorktree(id: "/tmp/repo/feature-x", name: "feature-x", repoRoot: repoRoot)
+    let observedUpstream = LockIsolated<String?>(nil)
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global.promptForWorktreeCreation = true }
+    let store = TestStore(initialState: makeState(repositories: [repository])) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.remoteNames = { _ in ["origin"] }
+      $0.gitClient.branchInventory = { _, _ in GitBranchInventory() }
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.upstreamBranchExists = { _, _ in true }
+      $0.gitClient.setUpstreamBranch = { _, upstream, _ in
+        observedUpstream.setValue(upstream)
+      }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree, mainWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .createRandomWorktreeInRepository(repository.id, upstream: .branch("origin/feature-x")))
+    #expect(store.state.parkedWorktreeRequests[repository.id]?.upstream == .branch("origin/feature-x"))
+    await store.receive(\.promptedWorktreeCreationDataLoaded)
+    #expect(store.state.worktreeCreationPrompt?.selectedUpstream == .branch("origin/feature-x"))
+    await store.send(.worktreeCreationPrompt(.presented(.set(\.branchName, "feature-x"))))
+    await store.send(.worktreeCreationPrompt(.presented(.createButtonTapped)))
+    await store.receive(\.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    #expect(observedUpstream.value == "origin/feature-x")
+  }
+
+  @Test(.dependencies) func noUpstreamSurvivesParkedPromptRoundTrip() async {
+    // The .unset leg of the parked-prompt path: --no-upstream must clear
+    // tracking after the prompt-driven creation, not revert to automatic.
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    let createdWorktree = makeWorktree(id: "/tmp/repo/feature-x", name: "feature-x", repoRoot: repoRoot)
+    let observedUnset = LockIsolated<String?>(nil)
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global.promptForWorktreeCreation = true }
+    let store = TestStore(initialState: makeState(repositories: [repository])) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.remoteNames = { _ in ["origin"] }
+      $0.gitClient.branchInventory = { _, _ in GitBranchInventory() }
+      $0.gitClient.localBranchNames = { _ in [] }
+      $0.gitClient.isValidBranchName = { _, _ in true }
+      $0.gitClient.isBareRepository = { _ in false }
+      $0.gitClient.ignoredFileCount = { _ in 0 }
+      $0.gitClient.untrackedFileCount = { _ in 0 }
+      $0.gitClient.unsetUpstreamBranch = { branch, _ in
+        observedUnset.setValue(branch)
+      }
+      $0.gitClient.createWorktreeStream = { _, _, _, _, _, _, _ in
+        AsyncThrowingStream { continuation in
+          continuation.yield(.finished(createdWorktree))
+          continuation.finish()
+        }
+      }
+      $0.gitClient.worktrees = { _ in [createdWorktree, mainWorktree] }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.createRandomWorktreeInRepository(repository.id, upstream: .unset))
+    #expect(store.state.parkedWorktreeRequests[repository.id]?.upstream == .unset)
+    await store.receive(\.promptedWorktreeCreationDataLoaded)
+    #expect(store.state.worktreeCreationPrompt?.selectedUpstream == .unset)
+    await store.send(.worktreeCreationPrompt(.presented(.set(\.branchName, "feature-x"))))
+    await store.send(.worktreeCreationPrompt(.presented(.createButtonTapped)))
+    await store.receive(\.createRandomWorktreeSucceeded)
+    await store.finish()
+
+    #expect(observedUnset.value == "feature-x")
+  }
+
+  @Test(.dependencies) func parkedUpstreamSeedsAnAlreadyOpenPrompt() async {
+    // A CLI request landing while a prompt for the same repository is open must
+    // update the visible selection in the same action that parks, so an
+    // immediate Create from the old prompt cannot drop the flag.
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global.promptForWorktreeCreation = true }
+    var state = makeState(repositories: [repository])
+    state.worktreeCreationPrompt = WorktreeCreationPromptFeature.State(
+      repositoryID: repository.id,
+      repositoryRootURL: repository.rootURL,
+      repositoryName: repository.name,
+      automaticBaseRef: "origin/main",
+      defaultBranch: "main",
+      remoteNames: ["origin"],
+      branchMenu: nil,
+      branchName: "",
+      selectedBaseRef: nil,
+      fetchOrigin: false,
+      defaultWorktreeBaseDirectory: "/tmp/repo/.worktrees",
+      validationMessage: nil
+    )
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.remoteNames = { _ in ["origin"] }
+      $0.gitClient.branchInventory = { _, _ in GitBranchInventory() }
+    }
+    store.exhaustivity = .off
+
+    await store.send(
+      .createRandomWorktreeInRepository(repository.id, upstream: .branch("origin/feature-x"))
+    ) {
+      $0.parkedWorktreeRequests[repository.id] = RepositoriesFeature.State.ParkedWorktreeRequest(
+        pendingID: nil, background: false, upstream: .branch("origin/feature-x"))
+      $0.worktreeCreationPrompt?.selectedUpstream = .branch("origin/feature-x")
+    }
+    await store.finish()
+  }
+
+  @Test(.dependencies) func automaticRequestDoesNotClobberAPickedUpstream() async {
+    // A default request (plain New Worktree, no CLI flag) must not touch an
+    // explicitly picked upstream in the open prompt before the reload lands;
+    // the reload then rebuilds the whole prompt (pre-existing full reset).
+    let repoRoot = "/tmp/repo"
+    let mainWorktree = makeWorktree(id: repoRoot, name: "main", repoRoot: repoRoot)
+    let repository = makeRepository(id: repoRoot, worktrees: [mainWorktree])
+    @Shared(.settingsFile) var settingsFile
+    $settingsFile.withLock { $0.global.promptForWorktreeCreation = true }
+    var state = makeState(repositories: [repository])
+    state.worktreeCreationPrompt = WorktreeCreationPromptFeature.State(
+      repositoryID: repository.id,
+      repositoryRootURL: repository.rootURL,
+      repositoryName: repository.name,
+      automaticBaseRef: "origin/main",
+      defaultBranch: "main",
+      remoteNames: ["origin"],
+      branchMenu: nil,
+      branchName: "",
+      selectedBaseRef: nil,
+      selectedUpstream: .branch("origin/picked"),
+      fetchOrigin: false,
+      defaultWorktreeBaseDirectory: "/tmp/repo/.worktrees",
+      validationMessage: nil
+    )
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.uuid = .incrementing
+      $0.gitClient.automaticWorktreeBaseRef = { _ in "origin/main" }
+      $0.gitClient.remoteNames = { _ in ["origin"] }
+      $0.gitClient.branchInventory = { _, _ in GitBranchInventory() }
+    }
+    store.exhaustivity = .off
+
+    await store.send(.createRandomWorktreeInRepository(repository.id))
+    #expect(store.state.worktreeCreationPrompt?.selectedUpstream == .branch("origin/picked"))
+    await store.receive(\.promptedWorktreeCreationDataLoaded)
+    // The rebuilt prompt starts fresh, matching the parked (default) request.
+    #expect(store.state.worktreeCreationPrompt?.selectedUpstream == .automatic)
+    await store.finish()
   }
 
   @Test func pinnedPendingTransfersCustomizationAndPinTogether() async {
@@ -7700,6 +7998,16 @@ struct RepositoriesFeatureTests {
     #expect(row.sidebarDisplayName == "wt-folder")
   }
 
+  @Test func sidebarDisplayNameUsesLeafOfRemoteHostKeyedId() {
+    let row = makeSidebarItem(id: "me@box:2222/srv/repo/wt", name: "feature/branch")
+    #expect(row.sidebarDisplayName == "wt")
+  }
+
+  @Test func sidebarDisplayNameIgnoresTrailingSlashInId() {
+    let row = makeSidebarItem(id: "/tmp/repo/wt/", name: "feature/branch")
+    #expect(row.sidebarDisplayName == "wt")
+  }
+
   @Test func sidebarDisplayNameFallsBackToBranchNameWhenIdAndSubtitleEmpty() {
     let row = makeSidebarItem(id: "row-no-slash", name: "feature/branch", detail: "")
     #expect(row.sidebarDisplayName == "feature/branch")
@@ -8937,6 +9245,110 @@ struct RepositoriesFeatureTests {
     #expect(state.worktreesForInfoWatcher() == [gitWorktree])
   }
 
+  @Test func mixedFolderDeleteAlertOffersTrashAndSpellsOutTheRemoteDowngrade() async throws {
+    // Mixed local + remote selection keeps "Delete from disk": the trash only
+    // ever touches local folders, and the copy states the remote downgrade.
+    let folderRoot = "/tmp/mixed-alert-local"
+    let folderURL = URL(fileURLWithPath: folderRoot)
+    let localWorktree = Worktree(
+      id: Repository.folderWorktreeID(for: folderURL),
+      kind: .folder,
+      name: Repository.name(for: folderURL),
+      detail: "",
+      workingDirectory: folderURL,
+      repositoryRootURL: folderURL
+    )
+    let localFolder = Repository(
+      id: RepositoryID(folderRoot),
+      rootURL: folderURL,
+      name: Repository.name(for: folderURL),
+      worktrees: IdentifiedArray(uniqueElements: [localWorktree]),
+      isGitRepository: false
+    )
+    let host = RemoteHost(alias: "devbox")
+    let remoteFolder = RepositoriesFeature.remoteFolderRepository(host: host, remotePath: "/home/me/notes")
+    let remoteRowID = try #require(remoteFolder.folderRowID)
+
+    var state = RepositoriesFeature.State()
+    state.repositories = [localFolder, remoteFolder]
+    state.repositoryRoots = [folderURL]
+    state.isInitialLoadComplete = true
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.analyticsClient.capture = { _, _ in }
+    }
+
+    let targets = [
+      RepositoriesFeature.DeleteWorktreeTarget(worktreeID: localWorktree.id, repositoryID: localFolder.id),
+      RepositoriesFeature.DeleteWorktreeTarget(worktreeID: remoteRowID, repositoryID: remoteFolder.id),
+    ]
+    await store.send(.requestDeleteSidebarItems(targets)) {
+      $0.alert = AlertState {
+        TextState("Remove 2 folders?")
+      } actions: {
+        ButtonState(
+          action: .confirmDeleteSidebarItems(targets, disposition: .folderUnlink)
+        ) {
+          TextState("Remove from Supacode")
+        }
+        ButtonState(
+          role: .destructive,
+          action: .confirmDeleteSidebarItems(targets, disposition: .folderTrash)
+        ) {
+          TextState("Delete from disk")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState(
+          "Remove mixed-alert-local, notes? Choose \"Remove from Supacode\" to stop "
+            + "managing the folders (they stay on disk)"
+            + ", or \"Delete from disk\" to move the local folder to the Trash "
+            + "(remote folders are only removed from Supacode)."
+        )
+      }
+    }
+  }
+
+  @Test func remoteOnlyFolderDeleteAlertOmitsTheTrashOption() async throws {
+    // An all-remote selection has nothing the local trash could touch, so the
+    // destructive option disappears entirely.
+    let host = RemoteHost(alias: "devbox")
+    let remoteFolder = RepositoriesFeature.remoteFolderRepository(host: host, remotePath: "/home/me/notes")
+    let remoteRowID = try #require(remoteFolder.folderRowID)
+
+    var state = RepositoriesFeature.State()
+    state.repositories = [remoteFolder]
+    state.isInitialLoadComplete = true
+    state.reconcileSidebarForTesting()
+    let store = TestStore(initialState: state) {
+      RepositoriesFeature()
+    } withDependencies: {
+      $0.analyticsClient.capture = { _, _ in }
+    }
+
+    let target = RepositoriesFeature.DeleteWorktreeTarget(worktreeID: remoteRowID, repositoryID: remoteFolder.id)
+    await store.send(.requestDeleteSidebarItems([target])) {
+      $0.alert = AlertState {
+        TextState("Remove folder?")
+      } actions: {
+        ButtonState(
+          action: .confirmDeleteSidebarItems([target], disposition: .folderUnlink)
+        ) {
+          TextState("Remove from Supacode")
+        }
+        ButtonState(role: .cancel) {
+          TextState("Cancel")
+        }
+      } message: {
+        TextState("Remove notes? This stops managing the folder (it stays on disk).")
+      }
+    }
+  }
+
   @Test func requestDeleteSidebarItemForFolderSkipsMainWorktreeLockAndRoutesToRepositoryRemoved() async {
     // Folders pipe their "Delete Folder…" context-menu action
     // through `.requestDeleteSidebarItems` using the synthetic main
@@ -9186,6 +9598,23 @@ struct RepositoriesFeatureTests {
     let row = state.sidebarItems[id: folderWorktree.id]
     #expect(row?.lifecycle == .deletingScript)
     #expect(row?.kind == .folder)
+  }
+
+  @Test func remoteFolderDeleteScriptRunningKeepsRowClickable() throws {
+    // The remote folder row is host-keyed, so `isRemovingRepository` must
+    // resolve it via `folderRowID` for the deleting-script exception to apply.
+    let host = RemoteHost(alias: "devbox")
+    let folderRepo = RepositoriesFeature.remoteFolderRepository(host: host, remotePath: "/home/me/notes")
+    let folderRowID = try #require(folderRepo.folderRowID)
+
+    var state = RepositoriesFeature.State()
+    state.repositories = [folderRepo]
+    state.isInitialLoadComplete = true
+    state.seedRemovalBatch(pending: [folderRepo.id: .folderUnlink])
+    state.reconcileSidebarForTesting()
+    state.sidebarItems[id: folderRowID]?.lifecycle = .deletingScript
+
+    #expect(state.isRemovingRepository(folderRepo) == false)
   }
 
   @Test func deleteWorktreeScriptFailureForFolderClearsRemovingState() async {
