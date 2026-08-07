@@ -61,6 +61,35 @@ security find-identity -v -p codesigning
 6. **收尾清理**：`git checkout -- Tuist/Package.resolved supacode.json`，
    恢复 `tuist install` 与启动 App 造成的构建副作用。
 
+## 发布到 GitHub Releases（不走 CI/CD）
+
+适用场景：除了装到本机，还想把本地构建挂到 GitHub Releases 上（比如在另一台机器上下载，
+或分享给同事）。同样不触发 CI/CD release。注意：该构建仍是本机 Apple Development
+证书签名 + **未公证**，其它 Mac 打开会被 Gatekeeper 拦（右键“打开”可绕过）。
+
+### 一步执行
+
+先确保已跑过 `./scripts/install-local.sh`（或至少构建并签名了
+`build/supacode.xcarchive`），然后：
+
+```bash
+./scripts/publish-local.sh
+```
+
+脚本会：把签名后的 App 打成 `supacode.app.zip` 和 `supacode.dmg`（create-dmg），
+生成 `checksums.json`（与 CI 上传同格式），用 GitHub API 自动生成 release notes，
+然后在 `origin` 远端创建（或更新）tag 为 `v<MARKETING_VERSION>` 的 release 并上传三个产物。
+
+支持选项：
+
+| 选项 | 说明 |
+| --- | --- |
+| `--repo owner/repo` | 发布到指定仓库（默认取 `origin` remote 对应的仓库，即你的 fork） |
+| `--tag NAME` | 自定义 tag（默认取 `Configurations/Project.xcconfig` 的 `MARKETING_VERSION`，即当前分支版本） |
+| `--target SHA` | release 指向的 commit（默认本地 HEAD；commit 必须已推到目标仓库） |
+| `--draft` / `--prerelease` | 创建草稿 / 预发布 |
+| `--dry-run` | 只打包产物并打印将执行的 gh 命令，不上传 |
+
 ## 为什么签这些
 
 `.github/scripts/resign_exported_app.sh` 对 Frameworks/PlugIns/Resources/
@@ -71,9 +100,16 @@ XPCServices/LoginItems 下所有 `*.app|*.appex|*.framework|*.xpc|*.dylib|可执
 
 ## 注意
 
+- **发布流程不会触发 CI**：脚本不创建本地 tag、不 push 任何东西，`gh release create`
+  只在远端建 tag。请**不要**手动 `git push` 这个 tag 或 main 分支，否则 `main.yml`
+  会接管并重新走 CI/CD 发布。
+- **前置条件**：本地已签名归档（`scripts/install-local.sh`）、`gh` 已登录（`gh auth login`）、
+  `mise install` 装好 `npm:create-dmg`（`create-dmg` 报缺模块时
+  `mise uninstall -y npm:create-dmg && mise install npm:create-dmg` 重装）。
+- 发布不带 Sparkle `appcast.xml` 和 delta（本地没有 Sparkle 私钥），所以 Sparkle
+  不会自动检测到更新，需要手动下载安装。
+- 发布产物未公证：`spctl` 拒绝；首次在其它 Mac 上打开会被 Gatekeeper 拦，右键“打开”。
 - `git checkout -- Tuist/Package.resolved supacode.json` 会丢弃这两个文件里的
   未提交改动；如有想保留的改动，先跑 `--no-cleanup` 再手动恢复。
-- 装好后：App 可以正常启动使用；但它没有公证，`spctl` 拒绝，首次在其它 Mac 上
-  复制过去打开时可能被 Gatekeeper 拦，需要右键“打开”。
 - 不要 push tag、不要 `make bump-and-release`。
 - Sparkle 自动更新通道仍指向正式 release，本地装的不影响。
