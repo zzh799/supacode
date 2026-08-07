@@ -39,13 +39,13 @@ extension WorkspaceClient: DependencyKey {
             [fileURL],
             withApplicationAt: appURL,
             configuration: NSWorkspace.OpenConfiguration()
-          ) { _, error in
+          ) { @Sendable _, error in
             continuation.resume(returning: error.map { .openFailed(action, $0) })
           }
         }
       }
       return await withCheckedContinuation { continuation in
-        NSWorkspace.shared.open(fileURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+        NSWorkspace.shared.open(fileURL, configuration: NSWorkspace.OpenConfiguration()) { @Sendable _, error in
           continuation.resume(
             returning: error.map {
               OpenActionError(
@@ -229,7 +229,7 @@ enum WorktreeOpener {
       )
       return
     }
-    NSWorkspace.shared.openApplication(at: appURL, configuration: workspaceConfiguration) { _, error in
+    NSWorkspace.shared.openApplication(at: appURL, configuration: workspaceConfiguration) { @Sendable _, error in
       guard let error else {
         return
       }
@@ -250,7 +250,7 @@ enum WorktreeOpener {
       [targetURL],
       withApplicationAt: appURL,
       configuration: configuration
-    ) { _, error in
+    ) { @Sendable _, error in
       guard let error else {
         return
       }

@@ -18,7 +18,9 @@ enum ManagedHookCommandVariables {
   /// A parameter-expansion modifier exempts the reference, but only inside braces:
   /// `${PPID:-}` runs while `$PPID-x` is still a bare name Grok demands. Verified
   /// against grok 0.2.118, where `$PPID` is refused and `${PPID:-}` expands.
-  private static let pattern = #/\$(\{)?([A-Za-z_][A-Za-z0-9_]*)([:\-+=?#%\/])?/#
+  private static var pattern: Regex<(Substring, Substring?, Substring, Substring?)> {
+    #/\$(\{)?([A-Za-z_][A-Za-z0-9_]*)([:\-+=?#%\/])?/#
+  }
 
   static func names(in command: String) -> Set<String> {
     Set(
