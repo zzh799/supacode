@@ -129,5 +129,4 @@ final class WindowFocusObserverNSView: NSView {
       center.removeObserver(appActivationObserver)
     }
   }
-  }
 }

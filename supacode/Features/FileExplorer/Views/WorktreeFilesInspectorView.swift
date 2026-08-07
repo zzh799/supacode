@@ -23,7 +23,7 @@ struct WorktreeFilesInspectorView: View {
       onOpenFile: onOpenFile,
       bottomBarInset: bottomBarInset
     )
-    .safeAreaBar(edge: .bottom) {
+    .safeAreaInset(edge: .bottom, spacing: 0) {
       FileExplorerPaneFooter(root: store.context?.root)
         .onGeometryChange(for: CGFloat.self) {
           $0.size.height
@@ -80,6 +80,10 @@ private struct FileExplorerRootPathControl: NSViewRepresentable {
     control.toolTip = (url.path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath
   }
 
+  // The macOS 15 SDK treats NSViewRepresentable coordinators as @MainActor,
+  // the `@objc` action runs on the main thread, and `clickedPathItem` is a
+  // main-actor-isolated property, so the coordinator is main-actor isolated.
+  @MainActor
   final class Coordinator: NSObject {
     @objc func reveal(_ sender: NSPathControl) {
       guard let clicked = sender.clickedPathItem?.url else { return }

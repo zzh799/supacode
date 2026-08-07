@@ -89,7 +89,7 @@ struct WorktreeGitInspectorView: View {
     }
     // The header bar sits only over the pull-request content, so the form scrolls
     // under it for the native top blur; the empty/checking states reserve no bar.
-    .safeAreaBar(edge: .top) {
+    .safeAreaInset(edge: .top, spacing: 0) {
       if !isFolder, let pullRequest {
         GitInspectorHeader(pullRequest: pullRequest)
       }
@@ -256,7 +256,6 @@ private struct GitInspectorContent: View {
     .formStyle(.grouped)
     // Let the window's terminal background (set in WindowChromeApplier) show through.
     .scrollContentBackground(.hidden)
-    .scrollEdgeEffectStyle(.soft, for: .all)
   }
 
   private static func sortedChecks(_ checks: [GithubPullRequestStatusCheck])
@@ -499,10 +498,9 @@ private struct NotificationsInspectorContent: View {
     .listStyle(.inset)
     // Let the window's terminal background (set in WindowChromeApplier) show through.
     .scrollContentBackground(.hidden)
-    .scrollEdgeEffectStyle(.soft, for: .all)
     // The header bar sits only over the list, so it scrolls under it for the
     // native top blur; the empty state reserves no bar.
-    .safeAreaBar(edge: .top) {
+    .safeAreaInset(edge: .top, spacing: 0) {
       if !groups.isEmpty {
         HStack {
           Text("Notifications")

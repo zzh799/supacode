@@ -55,6 +55,8 @@
 | macOS 26 API | macOS 15 等价写法 | 涉及位置 |
 |---|---|---|
 | `ConcentricRectangle`（Liquid Glass 圆角） | `RoundedRectangle(cornerRadius:)` | MenuBarNotificationsMenu、GhosttySurfaceSearchOverlay（含 `path(in:)` 里的 `#available` 分支） |
+| `.safeAreaBar(edge:)`（滚动内容可从下穿过、自带模糊的边栏） | `.safeAreaInset(edge:spacing: 0)`（保留空间，内容不穿过） | WorktreeStatusInspector、WorktreeFilesInspectorView（上游 FileExplorer） |
+| `.scrollEdgeEffectStyle(_:for:)` | 删除（macOS 15 无对应边沿效果 API） | WorktreeStatusInspector |
 | `.glassEffect(.regular, in:)` | `.background(.regularMaterial, in: .rect(cornerRadius:))` | SidebarCardView |
 | `ToolbarSpacer(.flexible)` | `ToolbarItem(placement: .navigation) { Spacer() }` | WorktreeDetailView 等 |
 | `ToolbarSpacer(.fixed)` | 直接删除（无用间距） | 同上 |
@@ -135,7 +137,8 @@ DeveloperSettingsView、SidebarListView、WorktreeDetailView。
 
 - [ ] 部署目标保持 15.0（Project.swift 五处 + Tuist.swift Xcode 门控）
 - [ ] 不用 macOS 26 专属 API：`Window` 场景、`ConcentricRectangle`、`glassEffect`、
-      `ToolbarSpacer`、`.sharedBackgroundVisibility`、`isolated deinit`
+      `ToolbarSpacer`、`.sharedBackgroundVisibility`、`.safeAreaBar`、`.scrollEdgeEffectStyle`、
+      `isolated deinit`
 - [ ] 新窗口一律走 shared presenter（先查 NSWindow 存在性再 openWindow）
 - [ ] 新 `Reduce` 闭包不加 `@MainActor`；主 actor 依赖用括号形式
       `MainActor.assumeIsolated({ ... })` 包裹，且不捕获 `inout`/`@Shared`

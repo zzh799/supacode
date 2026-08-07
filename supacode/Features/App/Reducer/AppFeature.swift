@@ -899,7 +899,7 @@ struct AppFeature {
       case .renameSelectedTerminalTab:
         guard let worktree = state.repositories.worktree(for: state.repositories.selectedWorktreeID),
           !worktree.isMissing,
-          let tabID = terminalClient.selectedTabID(worktree.id)
+          let tabID = MainActor.assumeIsolated({ terminalClient.selectedTabID(worktree.id) })
         else {
           return .none
         }
