@@ -3350,7 +3350,10 @@ struct AppFeature {
     state: inout State
   ) -> Bool {
     guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return false }
-    guard MainActor.assumeIsolated({ terminalClient.surfaceExists(worktreeID, TerminalTabID(rawValue: tabID), surfaceID) }) else {
+    let surfaceStillExists = MainActor.assumeIsolated {
+      terminalClient.surfaceExists(worktreeID, TerminalTabID(rawValue: tabID), surfaceID)
+    }
+    guard surfaceStillExists else {
       deeplinkLogger.warning("Surface \(surfaceID) not found in tab \(tabID) of worktree \(worktreeID)")
       state.alert = AlertState {
         TextState("Surface not found")

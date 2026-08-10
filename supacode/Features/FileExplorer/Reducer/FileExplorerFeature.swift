@@ -393,20 +393,38 @@ struct FileExplorerFeature {
 
     let worktreeID = context.worktree.id
     var effects: [Effect<Action>] = []
+    let isFreshTree: Bool
     if state.trees[worktreeID]?.root != root {
       // New tree, or the worktree moved on disk: start from a fresh root.
       var tree = TreeState(root: root)
       tree.directories[TreeState.rootPath] = .initialLoading
       state.trees[worktreeID] = tree
+      isFreshTree = true
       effects.append(
-        listEffect(worktreeID: worktreeID, root: root, directory: TreeState.rootPath, limit: Self.initialListingLimit)
+        // Root listing first, then the git-status probe. Concatenating (not
+        // merging) pins the delivery order so a fresh tree never shows
+        // decorations racing the first listing, and tests can rely on
+        // listing-then-status deterministically.
+        listEffect(
+          worktreeID: worktreeID,
+          root: root,
+          directory: TreeState.rootPath,
+          limit: Self.initialListingLimit
+        )
+        .concatenate(with: gitStatusEffect(state))
       )
-    } else if worktreeID != previousWorktreeID {
-      // Cached tree re-activated: freshen it instead of trusting stale listings.
-      effects.append(sweepEffect(state))
+    } else {
+      isFreshTree = false
+      if worktreeID != previousWorktreeID {
+        // Cached tree re-activated: freshen it instead of trusting stale listings.
+        effects.append(sweepEffect(state))
+      }
     }
     effects.append(touchRecentWorktree(&state, worktreeID: worktreeID))
-    effects.append(gitStatusEffect(state))
+    // The fresh-tree branch already chained the probe after the root listing.
+    if !isFreshTree {
+      effects.append(gitStatusEffect(state))
+    }
     effects.append(sweepTimerEffect())
     return .merge(effects)
   }

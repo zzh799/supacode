@@ -4,6 +4,7 @@ import Testing
 @testable import SupacodeSettingsShared
 @testable import supacode
 
+@MainActor
 struct OpenWorktreeActionTests {
   private struct TraeVariantExpectation {
     let action: OpenWorktreeAction

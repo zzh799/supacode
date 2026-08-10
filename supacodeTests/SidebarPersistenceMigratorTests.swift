@@ -206,7 +206,7 @@ struct SidebarPersistenceMigratorTests {
       owningWorktreeID: worktreeID,
       amongLegacyRoots: candidates
     )
-    #expect(resolved == roots.first.map(RepositoryID.init))
+    #expect(resolved == roots.first.map { RepositoryID($0) })
   }
 
   @Test func normalizerRejectsEmptyAndWhitespaceAndCollapsesDotComponents() {

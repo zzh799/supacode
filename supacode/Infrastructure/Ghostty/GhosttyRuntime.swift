@@ -12,10 +12,10 @@ final class GhosttyRuntime {
   /// (e.g. a wakeup) can fire after its runtime deinit freed the app, so
   /// dereferencing the raw userdata/app pointer would be use-after-free;
   /// every resolution validates membership first. Registered in init,
-  /// removed in deinit.
-  // Teardown runs from a nonisolated deinit, so these live registries can't be
-  // main-actor isolated. Access is rare (init / deinit / C-callback lookup), so
-  // the unsynchronized sets are acceptable here.
+  /// removed in deinit. Teardown runs from a nonisolated deinit, so these
+  /// live registries can't be main-actor isolated. Access is rare (init /
+  /// deinit / C-callback lookup), so the unsynchronized sets are acceptable
+  /// here.
   private nonisolated(unsafe) static var liveUserdataBits: Set<UInt> = []
   private nonisolated(unsafe) static var liveAppBits: Set<UInt> = []
 

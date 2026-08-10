@@ -1737,8 +1737,12 @@ struct SidebarStructureTests {
   // MARK: - Alert confirmations.
 
   @Test func deleteConfirmationsInvalidateEveryRowDerivedCache() {
-    // Both confirm handlers seed `removingRepositoryIDs` and call `syncSidebar`,
-    // which flips a pending row's lifecycle to `.deleting`.
+    // The confirm arms only dismiss the sheet and schedule the deferred work
+    // (see `sidebarAlertDismissalDeferral`), so they no longer touch caches.
+    // The actual seeding + `syncSidebar` — which flips a pending row's
+    // lifecycle to `.deleting` — moved to `.deleteSidebarItemsConfirmed` /
+    // `.repositoryRemovalRequested`, and those carry the `.allSidebar`
+    // recompute instead.
     let targets = [
       RepositoriesFeature.DeleteWorktreeTarget(worktreeID: "/tmp/repo/wt", repositoryID: "/tmp/repo")
     ]
@@ -1748,8 +1752,13 @@ struct SidebarStructureTests {
     let confirmRepository = RepositoriesFeature.Action.alert(
       .presented(.confirmDeleteRepository("/tmp/repo"))
     )
-    #expect(confirmItems.cacheInvalidations == .allSidebar)
-    #expect(confirmRepository.cacheInvalidations == .allSidebar)
+    let confirmedItems = RepositoriesFeature.Action.deleteSidebarItemsConfirmed(
+      targets, disposition: .gitWorktreeDelete)
+    let removalRequested = RepositoriesFeature.Action.repositoryRemovalRequested("/tmp/repo")
+    #expect(confirmItems.cacheInvalidations.isEmpty)
+    #expect(confirmRepository.cacheInvalidations.isEmpty)
+    #expect(confirmedItems.cacheInvalidations == .allSidebar)
+    #expect(removalRequested.cacheInvalidations == .allSidebar)
 
     // The remaining alert arms only clear the alert and forward.
     let dismiss = RepositoriesFeature.Action.alert(.dismiss)

@@ -10,6 +10,9 @@ import Foundation
 /// in the env it forwards. So a managed command may only name a forwarded var or a
 /// `__`-prefixed local the command assigns itself.
 enum ManagedHookCommandVariables {
+  // The capture groups are named by position for `replacing(_:with:)` of the
+  // raw pattern; wrapping them in a struct would only add ceremony. The
+  // groups map to: prefix-brace, name, modifier, closing-brace.
   /// Matches `$NAME` and `${NAME...}`. `$$` and awk's `$0` are excluded by the
   /// leading `[A-Za-z_]`, and `${__tty#/dev/}` captures just the name. Models the
   /// textual scan, not shell expansion, so it misses `${#NAME}`, `${!NAME}` and
@@ -18,7 +21,12 @@ enum ManagedHookCommandVariables {
   /// A parameter-expansion modifier exempts the reference, but only inside braces:
   /// `${PPID:-}` runs while `$PPID-x` is still a bare name Grok demands. Verified
   /// against grok 0.2.118, where `$PPID` is refused and `${PPID:-}` expands.
-  private static var pattern: Regex<(Substring, Substring?, Substring, Substring?)> {
+  /// The capture groups are named by position for `replacing(_:with:)` of the raw
+  /// pattern (prefix-brace, name, modifier, closing-brace); a struct would only
+  /// add ceremony.
+  private static var pattern: Regex<
+    (Substring, Substring?, Substring, Substring?)  // swiftlint:disable:this large_tuple
+  > {
     #/\$(\{)?([A-Za-z_][A-Za-z0-9_]*)([:\-+=?#%\/])?/#
   }
 

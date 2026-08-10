@@ -9426,12 +9426,15 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems([folderTarget], disposition: .folderUnlink)))
     )
-    // The plural confirm handler sets up the batch, fans into
+    // The confirm only dismisses the sheet; drive the sheet-close deferral,
+    // then the deferred handler sets up the batch, fans into
     // `.deleteSidebarItemConfirmed`, the per-target completion
     // drains into `.repositoryRemovalCompleted`, and the batch
     // terminal `.repositoriesRemoved([id])` does the one-shot
     // cleanup. Assert the key delegate hops so future regressions
     // that skip them don't silently pass, then drain the rest.
+    await store.advancePastAlertSheetClose(using: clock)
+    await store.receive(\.deleteSidebarItemsConfirmed)
     await store.receive(\.repositoriesRemoved)
     await store.receive(\.delegate.selectedWorktreeChanged)
     await store.skipReceivedActions()
@@ -9468,9 +9471,11 @@ struct RepositoriesFeatureTests {
     state.isInitialLoadComplete = true
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [folderRoot] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }
@@ -9483,6 +9488,8 @@ struct RepositoriesFeatureTests {
     await store.send(.requestDeleteRepository(folderRepo.id))
     #expect(store.state.alert != nil)
     await store.send(.alert(.presented(.confirmDeleteRepository(folderRepo.id))))
+    await store.advancePastAlertSheetClose(using: clock)
+    await store.receive(\.repositoryRemovalRequested)
     // Section-level remove flows through batch-of-1:
     // .confirmDeleteRepository → .repositoryRemovalCompleted (success)
     // → .repositoriesRemoved([id]) → reconciliation. Assert the
@@ -9872,9 +9879,11 @@ struct RepositoriesFeatureTests {
     }
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }
@@ -9887,6 +9896,7 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems([folderTarget], disposition: .folderTrash)))
     )
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     // The trash effect ran and moved the directory away (or logged
@@ -9925,9 +9935,11 @@ struct RepositoriesFeatureTests {
       worktreeID: folderWorktree.id, repositoryID: folderRepo.id)
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }
@@ -9940,6 +9952,7 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems([folderTarget], disposition: .folderTrash)))
     )
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     #expect(store.state.alert != nil, "trash failure must surface an alert")
@@ -10000,9 +10013,11 @@ struct RepositoriesFeatureTests {
     state.isInitialLoadComplete = true
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.repositoryPersistence.pruneRepositoryConfigs = { _ in }
@@ -10020,6 +10035,7 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems(targets, disposition: .folderTrash)))
     )
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     // Both folders stay (trash failed), and the alert mentions BOTH
@@ -10220,9 +10236,11 @@ struct RepositoriesFeatureTests {
     state.isInitialLoadComplete = true
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }
@@ -10240,6 +10258,7 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems(targets, disposition: .folderUnlink)))
     )
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     #expect(store.state.repositories.isEmpty)
@@ -10291,9 +10310,11 @@ struct RepositoriesFeatureTests {
     let savedPaths = LockIsolated<[[String]]>([])
     let prunedIDs = LockIsolated<[[String]]>([])
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [idA, idB] }
       $0.repositoryPersistence.saveRoots = { paths in
         savedPaths.withValue { $0.append(paths) }
@@ -10313,6 +10334,7 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems([targetA], disposition: .folderUnlink)))
     )
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     #expect(savedPaths.value.last == [idB], "saveRoots must persist the pruned root list")
@@ -10372,9 +10394,11 @@ struct RepositoriesFeatureTests {
     state.isInitialLoadComplete = true
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }
@@ -10398,9 +10422,10 @@ struct RepositoriesFeatureTests {
     await store.send(
       .alert(.presented(.confirmDeleteSidebarItems(targets, disposition: .folderUnlink)))
     )
-    // `.confirmDeleteSidebarItems` fans into the per-target
-    // `.confirmDeleteSidebarItem(target, action:)` which maps the
-    // folder intent before sending `.deleteSidebarItemConfirmed`.
+    // `.confirmDeleteSidebarItems` only dismisses the sheet; after the
+    // sheet-close deferral, `.deleteSidebarItemsConfirmed` maps the folder
+    // intent into per-target `.deleteSidebarItemConfirmed` sends.
+    await store.advancePastAlertSheetClose(using: clock)
     await store.skipReceivedActions()
 
     #expect(store.state.repositories.isEmpty)
@@ -10615,9 +10640,11 @@ struct RepositoriesFeatureTests {
     let folderBatchID = state.seedRemovalBatch(pending: [folderRepo.id: .folderUnlink])
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in true }
@@ -10631,6 +10658,7 @@ struct RepositoriesFeatureTests {
     // still pending. The section-remove must mint its own batch id
     // and leave the folder batch untouched.
     await store.send(.alert(.presented(.confirmDeleteRepository(gitRepo.id))))
+    await store.advancePastAlertSheetClose(using: clock)
     #expect(store.state.activeRemovalBatches[folderBatchID] != nil)
     #expect(store.state.activeRemovalBatches.count == 2)
 

@@ -480,7 +480,13 @@ extension RepositoriesFeature.Action {
     case .archiveWorktreeApply, .unarchiveWorktree,
       .deleteWorktreeApply, .worktreeDeleted,
       .createWorktreeInRepository, .createRandomWorktreeInRepository,
-      .autoDeleteExpiredArchivedWorktrees:
+      .autoDeleteExpiredArchivedWorktrees,
+      // Deferred post-confirm mutation arms. The alert-confirm arms they
+      // follow only clear the alert and schedule these after the sheet-close
+      // animation (see `sidebarAlertDismissalDeferral`); the actual
+      // `removingRepositoryIDs` seeding + `syncSidebar` (or lifecycle flip)
+      // lives here, so the invalidation rides along with the mutation.
+      .deleteSidebarItemsConfirmed, .repositoryRemovalRequested:
       return .allSidebar
 
     // `worktreeInfoEvent` is a pure effect-launcher (HEAD watcher tick): the
@@ -550,17 +556,14 @@ extension RepositoriesFeature.Action {
     case .renameBranchPrompt:
       return []
 
-    // The two confirm handlers that seed `removingRepositoryIDs` and resync the
-    // sidebar. `syncSidebar` is the only path that births or kills a row, and it
-    // flips a pending row's lifecycle to `.deleting`, which every row-derived
-    // cache projects (the context menu gates archive / delete / rename on it).
+    // The confirm arms now only clear `state.alert` and schedule the deferred
+    // work; the row mutations they used to do inline moved to
+    // `.deleteSidebarItemsConfirmed` / `.repositoryRemovalRequested`, which
+    // declare `.allSidebar` above. Listed one by one so a new alert that
+    // mutates a row cannot default into this bucket.
     case .alert(.presented(.confirmDeleteSidebarItems)),
-      .alert(.presented(.confirmDeleteRepository)):
-      return .allSidebar
-    // The remaining alert arms only clear `state.alert` and forward an action;
-    // the forwarded action declares its own invalidations. Listed one by one so a
-    // new alert that mutates a row cannot default into this bucket.
-    case .alert(.presented(.confirmArchiveWorktree)),
+      .alert(.presented(.confirmDeleteRepository)),
+      .alert(.presented(.confirmArchiveWorktree)),
       .alert(.presented(.confirmArchiveWorktrees)),
       .alert(.presented(.confirmRemoveFailedRepository)),
       .alert(.presented(.viewTerminalTab)),

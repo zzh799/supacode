@@ -4,6 +4,7 @@ import Testing
 
 @testable import supacode
 
+@MainActor
 struct CodingAgentsSidebarCardModeTests {
   @Test func anyInstalledSuppressesPromptInstall() {
     let states: [SkillAgent: AgentIntegrationRowState] = [

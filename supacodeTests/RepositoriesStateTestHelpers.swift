@@ -1,3 +1,4 @@
+import ComposableArchitecture
 import Foundation
 
 @testable import supacode
@@ -31,5 +32,17 @@ extension RepositoriesFeature.State {
       id: id, pending: Set(pending.keys)
     )
     return id
+  }
+}
+
+extension TestStore where State == RepositoriesFeature.State, Action == RepositoriesFeature.Action {
+  /// Alert-confirm arms defer their sidebar mutations until the confirmation
+  /// sheet has finished closing (`RepositoriesFeature.sidebarAlertDismissalDeferral`),
+  /// so the confirm action itself no longer seeds batches or flips rows.
+  /// Tests that confirm an alert must inject a `TestClock` as
+  /// `continuousClock` and drive it past the deferral with this helper before
+  /// asserting on the deferred work.
+  func advancePastAlertSheetClose(using clock: TestClock<Duration>) async {
+    await clock.advance(by: RepositoriesFeature.sidebarAlertDismissalDeferral)
   }
 }

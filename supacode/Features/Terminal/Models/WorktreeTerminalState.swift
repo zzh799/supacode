@@ -2443,8 +2443,10 @@ final class WorktreeTerminalState {
   /// the remote project dir, then exec a login shell. The `cd` failure is
   /// swallowed so a stale path still drops the user into a usable shell. Nil
   /// for an empty/root path falls back to a bare login shell. The path is
-  /// quoted for whichever login shell re-parses the session command.
-  static func remoteDefaultShellCommand(remotePath: String) -> String? {
+  /// quoted for whichever login shell re-parses the session command. `nonisolated`
+  /// because it is a pure string transform callable off the main actor
+  /// (tests run it inside a `@Sendable` temp-directory closure).
+  nonisolated static func remoteDefaultShellCommand(remotePath: String) -> String? {
     let trimmed = remotePath.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty, trimmed != "/" else { return nil }
     let quoted = SSHCommand.loginShellQuote(trimmed)

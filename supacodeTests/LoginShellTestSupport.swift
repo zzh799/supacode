@@ -118,10 +118,12 @@ nonisolated enum LoginShellProbe {
   }
 
   /// A temporary directory removed when `body` returns, so a fixture named
-  /// `worktree:it's\literal` never leaks into the temp tree.
-  static func withTemporaryDirectory<T>(
+  /// `worktree:it's\literal` never leaks into the temp tree. The `@Sendable`
+  /// + `T: Sendable` pair keeps the closure crossing-safe for callers that
+  /// invoke it from a `@MainActor` test struct (Swift 6 strict sending checks).
+  static func withTemporaryDirectory<T: Sendable>(
     _ name: String,
-    body: (URL) async throws -> T
+    body: @Sendable (URL) async throws -> T
   ) async throws -> T {
     let root = FileManager.default.temporaryDirectory
       .appending(path: "supacode-\(name)-\(UUID().uuidString)")

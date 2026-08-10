@@ -30,7 +30,15 @@ extension RepositoryPersistenceClient: DependencyKey {
       saveRoots: { roots in
         @Shared(.repositoryRoots) var sharedRoots: [String]
         $sharedRoots.withLock {
-          $0 = roots
+          // Normalize BEFORE the in-memory write: `withLock` mutates the
+          // cached value in place and then persists it via the key's
+          // `save` (which normalizes again, idempotently). If the value
+          // written here stayed raw, any reader hitting the live cache
+          // (rather than a fresh `load`) would see un-normalized,
+          // duplicated roots until the reference was evicted - and tests
+          // flip-flopped on whether the cache eviction happened between
+          // save and load.
+          $0 = RepositoryPathNormalizer.normalize(roots)
         }
       },
       pruneRepositoryConfigs: { repositoryIDs in

@@ -474,6 +474,11 @@ struct RepositoriesFeature {
     case archiveWorktreeApplyFailed(Worktree.ID)
     case unarchiveWorktree(Worktree.ID)
     case requestDeleteSidebarItems([DeleteWorktreeTarget])
+    /// Deferred counterpart of `confirmDeleteSidebarItems`: the confirm arm only
+    /// clears the alert and schedules this after `sidebarAlertDismissalDeferral`,
+    /// so sidebar rows never mutate while the confirmation sheet is animating
+    /// closed (see the constant for the macOS 15 crash that motivates it).
+    case deleteSidebarItemsConfirmed([DeleteWorktreeTarget], disposition: DeleteDisposition)
     case deleteSidebarItemConfirmed(Worktree.ID, Repository.ID, background: Bool = false)
     case deleteScriptCompleted(worktreeID: Worktree.ID, exitCode: Int?, tabId: TerminalTabID?)
     case deleteWorktreeApply(Worktree.ID, Repository.ID)
@@ -490,6 +495,9 @@ struct RepositoriesFeature {
     case requestDeleteRepository(Repository.ID)
     case requestRemoveFailedRepository(Repository.ID)
     case removeFailedRepository(Repository.ID)
+    /// Deferred counterpart of `confirmDeleteRepository`: same sheet-close
+    /// deferral as `deleteSidebarItemsConfirmed`.
+    case repositoryRemovalRequested(Repository.ID)
     /// Per-target signal feeding the batch aggregator. Every
     /// repo-level removal path (folder via delete pipeline,
     /// git-repo section-level) emits one of these when the target's
@@ -624,6 +632,22 @@ struct RepositoriesFeature {
     )
     case selectTerminalTab(Worktree.ID, tabId: TerminalTabID)
   }
+
+  /// How long after an alert sheet begins dismissing to wait before applying
+  /// the alert's confirmed sidebar mutations. macOS 15's SwiftUI `List` (an
+  /// `NSOutlineView` under the hood) crashes with a row-item use-after-free
+  /// when sidebar rows mutate while the confirmation sheet is still animating
+  /// closed: the `NSSheetMoveHelper` close animation drives a display cycle
+  /// that walks `-[NSOutlineView _addOutlineCellTrackingAreas]` →
+  /// `rowForItem:` over items SwiftUI has already released, crashing in
+  /// `NSConcreteMapTable probeGC` (`objc_msgSend` on a freed object, `EXC_BAD_ACCESS`
+  /// "possible pointer authentication failure"; reproduced on macOS 15.7.5 when
+  /// deleting a worktree). The NSAlert close animation runs ~0.2 s; 0.35 s
+  /// rides it out with margin. Every alert-confirm arm that would mutate the
+  /// sidebar clears the alert immediately (so the sheet starts closing) and
+  /// defers its mutations by this delay, injected through `continuousClock` so
+  /// tests drive it with a `TestClock`.
+  static let sidebarAlertDismissalDeferral: Duration = .milliseconds(350)
 
   @Dependency(AnalyticsClient.self) private var analyticsClient
   @Dependency(GitClientDependency.self) private var gitClient
@@ -822,11 +846,10 @@ struct RepositoriesFeature {
         return .send(.archiveWorktreeConfirmed(worktreeID, repositoryID))
 
       case .alert(.presented(.confirmArchiveWorktrees(let targets))):
-        return .merge(
-          targets.map { target in
-            .send(.archiveWorktreeConfirmed(target.worktreeID, target.repositoryID))
-          }
-        )
+        // Deferred in `postAlertDeferralReducer`: this `Reduce` sits at the
+        // type-checker's complexity limit, and the deferral effect tipped it
+        // over. The `default` arm below passes it through untouched.
+        return .none
 
       case .scriptCompleted(let worktreeID, let kind, let exitCode, let tabId):
         // `runningScripts` reconciles from the terminal's row projection
@@ -1016,6 +1039,125 @@ struct RepositoriesFeature {
         let repositories = state.repositories
         return .send(.delegate(.repositoriesChanged(repositories)))
 
+      case .alert(.presented(.confirmDeleteSidebarItems(let targets, let disposition))):
+        // Dismiss the sheet right away, then defer every sidebar mutation until
+        // its close animation has finished: row mutations during the sheet-close
+        // display cycle crash macOS 15's List (see `sidebarAlertDismissalDeferral`).
+        // Validation lives in `.deleteSidebarItemsConfirmed` so it still runs
+        // against live state after the delay.
+        state.alert = nil
+        let clock = clock
+        return .run { send in
+          try await clock.sleep(for: Self.sidebarAlertDismissalDeferral)
+          await send(.deleteSidebarItemsConfirmed(targets, disposition: disposition))
+        }
+
+      case .deleteSidebarItemsConfirmed(let targets, let disposition):
+        // NOTE: do NOT clear `state.alert` here. `.confirmDeleteSidebarItems`
+        // already cleared the sheet being confirmed; an unconditional clear at
+        // this deferred point could wipe an alert that arrived during the
+        // sheet-close window (same reasoning as `deleteSidebarItemConfirmed`).
+        // Kind-and-disposition mapping: folders carry the
+        // disposition into `removingRepositoryIDs` so
+        // `.deleteScriptCompleted` can route by stored choice later.
+        // Git worktrees run the standard per-worktree pipeline and
+        // don't record a repo-level disposition. Kind / disposition
+        // mismatches are impossible under the current alert surface
+        // and a caller bypassing those guards is a bug, so flag it via
+        // `reportIssue` instead of dropping silently.
+        state.alert = nil
+        var validTargets: [DeleteWorktreeTarget] = []
+        var folderBatchIDs: Set<Repository.ID> = []
+        for target in targets {
+          guard let repository = state.repositories[id: target.repositoryID],
+            state.removingRepositoryIDs[target.repositoryID] == nil
+          else { continue }
+          if repository.isGitRepository {
+            guard disposition == .gitWorktreeDelete else {
+              reportIssue(
+                """
+                confirmDeleteSidebarItems: received \(disposition) for git worktree \
+                \(target.worktreeID): git targets only support .gitWorktreeDelete. \
+                Dropping target.
+                """
+              )
+              continue
+            }
+          } else {
+            guard disposition.isFolder else {
+              reportIssue(
+                """
+                confirmDeleteSidebarItems: received \(disposition) for folder \
+                \(target.repositoryID): folder targets only support .folderUnlink / \
+                .folderTrash. Dropping target.
+                """
+              )
+              continue
+            }
+            folderBatchIDs.insert(target.repositoryID)
+          }
+          validTargets.append(target)
+        }
+        guard !validTargets.isEmpty else { return .none }
+        if !folderBatchIDs.isEmpty {
+          // All folder targets in this batch share the same
+          // disposition (the alert only ever produces one), so one
+          // record shape per repo keeps disposition + batch id in
+          // lockstep.
+          let batchID = uuid()
+          for repositoryID in folderBatchIDs {
+            state.removingRepositoryIDs[repositoryID] = RepositoryRemovalRecord(
+              disposition: disposition, batchID: batchID
+            )
+          }
+          Self.syncSidebar(&state)
+          state.activeRemovalBatches[batchID] =
+            ActiveRemovalBatch(id: batchID, pending: folderBatchIDs)
+        }
+        return .merge(
+          validTargets.map {
+            .send(.deleteSidebarItemConfirmed($0.worktreeID, $0.repositoryID))
+          }
+        )
+
+      default:
+        return .none
+      }
+    }
+  }
+
+  /// Alert-confirm arms that must defer their sidebar mutations until the
+  /// confirmation sheet has fully finished closing (see
+  /// `sidebarAlertDismissalDeferral`). Isolated from `worktreeArchiveReducer`,
+  /// which sits at the type-checker's complexity limit: the deferral effect
+  /// (a `clock.sleep` + fan-out `send` closure) tipped it over.
+  var postAlertDeferralReducer: some Reducer<State, Action> {
+    Reduce { state, action in
+      switch action {
+      case .alert(.presented(.confirmArchiveWorktrees(let targets))):
+        // Dismiss the sheet immediately; the lifecycle flips follow after the
+        // sheet-close animation (same macOS 15 List crash as the delete path).
+        // `archiveWorktreeConfirmed` still clears the alert itself for its
+        // direct callers, which is a no-op here.
+        state.alert = nil
+        let clock = clock
+        return .run { send in
+          try await clock.sleep(for: Self.sidebarAlertDismissalDeferral)
+          for target in targets {
+            await send(.archiveWorktreeConfirmed(target.worktreeID, target.repositoryID))
+          }
+        }
+      default:
+        return .none
+      }
+    }
+  }
+
+  /// Delete / remove worktree + repository handlers, split from `worktreeArchiveReducer` so each
+  /// `Reduce` closure stays well under the type-checker's complexity limit.
+  var worktreeRemovalReducer: some Reducer<State, Action> {
+    Reduce { state, action in
+      switch action {
       case .requestDeleteSidebarItems(let targets):
         // Kind discriminator: folders skip the main-worktree guard
         // (their synthetic worktree IS main). Mixed kind selections
@@ -1150,81 +1292,6 @@ struct RepositoriesFeature {
         }
         return .none
 
-      case .alert(.presented(.confirmDeleteSidebarItems(let targets, let disposition))):
-        // Kind-and-disposition mapping: folders carry the
-        // disposition into `removingRepositoryIDs` so
-        // `.deleteScriptCompleted` can route by stored choice later.
-        // Git worktrees run the standard per-worktree pipeline and
-        // don't record a repo-level disposition. Kind / disposition
-        // mismatches are impossible under the current alert surface
-        // and a caller bypassing those guards is a bug, so flag it via
-        // `reportIssue` instead of dropping silently.
-        state.alert = nil
-        var validTargets: [DeleteWorktreeTarget] = []
-        var folderBatchIDs: Set<Repository.ID> = []
-        for target in targets {
-          guard let repository = state.repositories[id: target.repositoryID],
-            state.removingRepositoryIDs[target.repositoryID] == nil
-          else { continue }
-          if repository.isGitRepository {
-            guard disposition == .gitWorktreeDelete else {
-              reportIssue(
-                """
-                confirmDeleteSidebarItems: received \(disposition) for git worktree \
-                \(target.worktreeID): git targets only support .gitWorktreeDelete. \
-                Dropping target.
-                """
-              )
-              continue
-            }
-          } else {
-            guard disposition.isFolder else {
-              reportIssue(
-                """
-                confirmDeleteSidebarItems: received \(disposition) for folder \
-                \(target.repositoryID): folder targets only support .folderUnlink / \
-                .folderTrash. Dropping target.
-                """
-              )
-              continue
-            }
-            folderBatchIDs.insert(target.repositoryID)
-          }
-          validTargets.append(target)
-        }
-        guard !validTargets.isEmpty else { return .none }
-        if !folderBatchIDs.isEmpty {
-          // All folder targets in this batch share the same
-          // disposition (the alert only ever produces one), so one
-          // record shape per repo keeps disposition + batch id in
-          // lockstep.
-          let batchID = uuid()
-          for repositoryID in folderBatchIDs {
-            state.removingRepositoryIDs[repositoryID] = RepositoryRemovalRecord(
-              disposition: disposition, batchID: batchID
-            )
-          }
-          Self.syncSidebar(&state)
-          state.activeRemovalBatches[batchID] =
-            ActiveRemovalBatch(id: batchID, pending: folderBatchIDs)
-        }
-        return .merge(
-          validTargets.map {
-            .send(.deleteSidebarItemConfirmed($0.worktreeID, $0.repositoryID))
-          }
-        )
-
-      default:
-        return .none
-      }
-    }
-  }
-
-  /// Delete / remove worktree + repository handlers, split from `worktreeArchiveReducer` so each
-  /// `Reduce` closure stays well under the type-checker's complexity limit.
-  var worktreeRemovalReducer: some Reducer<State, Action> {
-    Reduce { state, action in
-      switch action {
       case .deleteSidebarItemConfirmed(let worktreeID, let repositoryID, let background):
         guard let repository = state.repositories[id: repositoryID],
           let worktree = repository.worktrees[id: worktreeID]
@@ -1607,16 +1674,29 @@ struct RepositoriesFeature {
 
       case .alert(.presented(.confirmRemoveFailedRepository(let repositoryID))):
         state.alert = nil
-        return .send(.removeFailedRepository(repositoryID))
+        let clock = clock
+        return .run { send in
+          try await clock.sleep(for: Self.sidebarAlertDismissalDeferral)
+          await send(.removeFailedRepository(repositoryID))
+        }
 
       case .alert(.presented(.confirmDeleteRepository(let repositoryID))):
+        // Sheet-close deferral (see `sidebarAlertDismissalDeferral`); the actual
+        // seeding + removal move to `.repositoryRemovalRequested`.
+        state.alert = nil
+        let clock = clock
+        return .run { send in
+          try await clock.sleep(for: Self.sidebarAlertDismissalDeferral)
+          await send(.repositoryRemovalRequested(repositoryID))
+        }
+
+      case .repositoryRemovalRequested(let repositoryID):
         guard let repository = state.repositories[id: repositoryID] else {
           return .none
         }
         if state.removingRepositoryIDs[repository.id] != nil {
           return .none
         }
-        state.alert = nil
         // Section-level removal: Supacode never nukes a git repo's
         // on-disk state. No script runs; signal completion
         // immediately and let the aggregator (batch of 1) emit the
@@ -4223,9 +4303,11 @@ struct RepositoriesFeature {
         // here by the trailing `.alert` catch-all returning `.none`.
         return .none
 
-      case .deleteSidebarItemConfirmed, .deleteScriptCompleted, .deleteWorktreeApply, .worktreeDeleted,
+      case .deleteSidebarItemConfirmed, .deleteSidebarItemsConfirmed, .deleteScriptCompleted,
+        .deleteWorktreeApply, .worktreeDeleted,
         .repositoriesMoved, .pinnedWorktreesMoved, .unpinnedWorktreesMoved, .deleteWorktreeFailed,
         .requestDeleteRepository, .requestRemoveFailedRepository, .removeFailedRepository,
+        .repositoryRemovalRequested,
         .repositoryRemovalCompleted, .repositoriesRemoved:
         // Real handling lives in `worktreeRemovalReducer` (combined below) so `body` stays under
         // the type-checker's complexity limit. The two `.alert(.presented(.confirm…))` arms in that
@@ -4422,6 +4504,7 @@ struct RepositoriesFeature {
       }
     worktreeArchiveReducer
     worktreeRemovalReducer
+    postAlertDeferralReducer
     worktreeCreateInRepoReducer
     worktreeNotificationReducer
     githubIntegrationReducer
@@ -4825,6 +4908,10 @@ struct RepositoriesFeature {
     let environmentError: GitEnvironmentError?
   }
 
+  // Long sequential pipeline (fetch-all → classify → git probe → prune).
+  // Extracting mid-function steps hides the ordering guarantees the next
+  // step relies on, so it stays one function with the disabler.
+  // swiftlint:disable:next function_body_length
   private func loadRepositoriesData(
     _ roots: [URL],
     timeout: Double = 30
