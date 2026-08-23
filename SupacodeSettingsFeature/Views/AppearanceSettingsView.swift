@@ -35,6 +35,12 @@ public struct AppearanceSettingsView: View {
           Text("Supacode terminal theme")
           Text("When off, honors your Ghostty config theme.")
         }
+        Toggle(isOn: $store.uiGlassEffectDisabled) {
+          Text("Disable UI glass effect")
+          Text(
+            "Renders windows and panels fully opaque instead of the translucent frosted-glass look."
+          )
+        }
       }
       Section {
         LabeledContent {

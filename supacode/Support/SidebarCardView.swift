@@ -1,3 +1,5 @@
+import Sharing
+import SupacodeSettingsShared
 import SwiftUI
 
 /// Pinned sidebar card surface (glass background, 10pt radius, leading-aligned).
@@ -6,9 +8,18 @@ import SwiftUI
 /// X button; it lives in the same HStack as `header`, so wide header content
 /// (avatars, icons) can't land underneath the dismiss target.
 struct SidebarCard<Header: View, Content: View>: View {
+  @Shared(.settingsFile) private var settingsFile
   let onDismiss: (() -> Void)?
   @ViewBuilder let content: () -> Content
   @ViewBuilder let header: () -> Header
+
+  /// Frosted material normally, solid system fill when the UI glass effect is
+  /// disabled. System colors only, so both variants track light/dark.
+  private var cardBackground: some ShapeStyle {
+    settingsFile.global.uiGlassEffectDisabled
+      ? AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+      : AnyShapeStyle(.regularMaterial)
+  }
 
   init(
     onDismiss: (() -> Void)? = nil,
@@ -45,8 +56,9 @@ struct SidebarCard<Header: View, Content: View>: View {
     .padding(12)
     .frame(maxWidth: .infinity, alignment: .leading)
     // macOS 15 predates SwiftUI's glassEffect (macOS 26); a regular material
-    // with the same 10pt corner radius reads identically on both.
-    .background(.regularMaterial, in: .rect(cornerRadius: 10))
+    // with the same 10pt corner radius reads identically on both. With the UI
+    // glass effect disabled, fall back to the solid control background.
+    .background(cardBackground, in: .rect(cornerRadius: 10))
     .padding(.horizontal, 10)
     .padding(.bottom, 10)
   }

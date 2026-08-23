@@ -143,11 +143,13 @@ final class CommandPalettePanelHostView: NSView {
 
     // Tahoe liquid glass (NSGlassEffectView) is macOS 26-only; the macOS 15
     // target uses a HUD-material visual effect view as the translucent backdrop
-    // instead. The panel, the hosting view, and the SwiftUI card are all
-    // transparent; the titled window applies the corner radius and clips to it,
-    // so the glass needs no radius of its own.
+    // instead. With the glass effect disabled, a window-background material keeps
+    // the palette fully opaque. The panel, the hosting view, and the SwiftUI card
+    // are all transparent; the titled window applies the corner radius and clips
+    // to it, so the backdrop needs no radius of its own.
     let glass = NSVisualEffectView()
-    glass.material = .hudWindow
+    glass.material =
+      settingsFile.global.uiGlassEffectDisabled ? .windowBackground : .hudWindow
     glass.blendingMode = .behindWindow
     glass.state = .active
     glass.addSubview(hostingView)

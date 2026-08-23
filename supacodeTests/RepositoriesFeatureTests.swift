@@ -9382,9 +9382,13 @@ struct RepositoriesFeatureTests {
     state.isInitialLoadComplete = true
 
     state.reconcileSidebarForTesting()
+    let clock = TestClock()
     let store = TestStore(initialState: state) {
       RepositoriesFeature()
     } withDependencies: {
+      // The alert-sheet close deferral schedules on this clock;
+      // advancePastAlertSheetClose below drives it.
+      $0.continuousClock = clock
       $0.repositoryPersistence.loadRoots = { [folderRoot] }
       $0.repositoryPersistence.saveRoots = { _ in }
       $0.gitClient.isGitRepository = { _ in false }

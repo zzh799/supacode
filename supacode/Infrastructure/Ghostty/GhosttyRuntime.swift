@@ -547,6 +547,7 @@ final class GhosttyRuntime {
   private static func loadConfig() -> (config: ghostty_config_t, userBackgroundOpacity: Double)? {
     @Shared(.settingsFile) var settingsFile
     let themeSyncEnabled = settingsFile.global.terminalThemeSyncEnabled
+    let glassDisabled = settingsFile.global.uiGlassEffectDisabled
     guard let config = ghostty_config_new() else { return nil }
     ghostty_config_load_default_files(config)
     ghostty_config_load_recursive_files(config)
@@ -554,7 +555,7 @@ final class GhosttyRuntime {
     // Snapshot the user's opacity from a clone before the override clobbers it.
     let userOpacity: Double
     if let userView = ghostty_config_clone(config) {
-      loadBundledTheme(into: userView, enabled: themeSyncEnabled)
+      loadBundledTheme(into: userView, enabled: themeSyncEnabled, glassDisabled: glassDisabled)
       ghostty_config_finalize(userView)
       userOpacity = readBackgroundOpacity(from: userView)
       ghostty_config_free(userView)
@@ -562,10 +563,12 @@ final class GhosttyRuntime {
       userOpacity = 1
     }
     // Last-write-wins: overrides must follow theme so the bundled padding wins.
-    loadBundledTheme(into: config, enabled: themeSyncEnabled)
+    loadBundledTheme(into: config, enabled: themeSyncEnabled, glassDisabled: glassDisabled)
     loadBundledOverrides(into: config)
     ghostty_config_finalize(config)
-    return (config, userOpacity)
+    // With the glass effect disabled, windows must be fully opaque no matter
+    // what the bundled theme or the user's own Ghostty config says.
+    return (config, glassDisabled ? 1 : userOpacity)
   }
 
   private static func readBackgroundOpacity(from config: ghostty_config_t) -> Double {
@@ -632,30 +635,45 @@ final class GhosttyRuntime {
     tempURL.path.withCString { ghostty_config_load_file(config, $0) }
   }
 
-  /// Loads the bundled Supacode light/dark theme plus its opacity and blur. No-op when sync is disabled.
-  private static func loadBundledTheme(into config: ghostty_config_t, enabled: Bool) {
-    guard enabled else { return }
-    guard
-      let lightPath = Bundle.main.path(forResource: "Supacode Light", ofType: nil),
-      let darkPath = Bundle.main.path(forResource: "Supacode Dark", ofType: nil)
-    else {
-      assertionFailure("Bundled Supacode themes missing from app bundle.")
-      logger.warning("Bundled Supacode themes missing from app bundle.")
-      return
+  /// Loads the bundled Supacode light/dark theme plus its opacity and blur.
+  /// With `glassDisabled`, forces fully opaque surfaces instead. Theme loading
+  /// alone is skipped when sync is disabled.
+  private static func loadBundledTheme(
+    into config: ghostty_config_t,
+    enabled: Bool,
+    glassDisabled: Bool
+  ) {
+    guard enabled || glassDisabled else { return }
+    var lines: [String] = []
+    if enabled {
+      guard
+        let lightPath = Bundle.main.path(forResource: "Supacode Light", ofType: nil),
+        let darkPath = Bundle.main.path(forResource: "Supacode Dark", ofType: nil)
+      else {
+        assertionFailure("Bundled Supacode themes missing from app bundle.")
+        logger.warning("Bundled Supacode themes missing from app bundle.")
+        return
+      }
+      lines.append("theme = light:\(lightPath),dark:\(darkPath)")
     }
-    let contents = """
-      theme = light:\(lightPath),dark:\(darkPath)
-      background-opacity = 0.9
-      background-blur = true
-      """
+    lines.append(
+      glassDisabled
+        ? backgroundDirectives(opacity: 1, blur: false)
+        : backgroundDirectives(opacity: 0.9, blur: true)
+    )
     let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-theme.conf")
     do {
-      try contents.write(to: tempURL, atomically: true, encoding: .utf8)
+      try lines.joined(separator: "\n").write(to: tempURL, atomically: true, encoding: .utf8)
     } catch {
       logger.warning("Failed to write bundled theme config: \(error.localizedDescription)")
       return
     }
     tempURL.path.withCString { ghostty_config_load_file(config, $0) }
+  }
+
+  /// The `background-opacity` / `background-blur` directives as one config line.
+  internal static func backgroundDirectives(opacity: Double, blur: Bool) -> String {
+    "background-opacity = \(opacity)\nbackground-blur = \(blur)"
   }
 
   func keyboardShortcut(for action: String) -> KeyboardShortcut? {

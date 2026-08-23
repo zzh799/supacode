@@ -12,7 +12,10 @@ import Testing
 @MainActor
 @Suite(.serialized)
 struct WorktreeStatusCLITests {
-  private struct Run {
+  // Sendable: pure value data produced by a nonisolated static helper and
+  // consumed back on the main actor; without this the cli closure's inferred
+  // type fails Swift 6 strict-concurrency sending checks.
+  private struct Run: Sendable {
     let standardOutput: String
     let standardError: String
     let exitCode: Int32
@@ -197,7 +200,10 @@ struct WorktreeStatusCLITests {
     failWith: String? = nil,
     resource expected: String = "worktrees",
     body: (
-      _ cli: ([String]) async throws -> Run,
+      // @Sendable: the fixture closure only captures Sendable state (socket
+      // path), and declaring it so satisfies the strict-concurrency sending
+      // check when test bodies hop off the main actor to await the CLI.
+      _ cli: @Sendable ([String]) async throws -> Run,
       _ resources: LockIsolated<[String]>,
       _ parameters: LockIsolated<[[String: String]]>
     ) async throws -> Void

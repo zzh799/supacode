@@ -46,6 +46,11 @@ struct GhosttyColorSchemeSyncView<Content: View>: View {
       .onChange(of: settingsFile.global.terminalThemeSyncEnabled) {
         ghostty.reloadAppConfig()
       }
+      .onChange(of: settingsFile.global.uiGlassEffectDisabled) {
+        // Reload so surfaces drop/restore their translucency and the window
+        // chrome observers re-apply opaque vs blurred chrome live.
+        ghostty.reloadAppConfig()
+      }
   }
 
   private static func appColorScheme() -> ColorScheme {

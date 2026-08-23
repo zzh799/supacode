@@ -104,6 +104,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   /// Beta: hidden terminal tabs release their renderer after a few minutes of
   /// inactivity and reconnect when viewed. On by default.
   public var terminalHibernationEnabled: Bool
+  /// When true, renders windows and floating panels fully opaque instead of the
+  /// translucent frosted-glass look (no background blur, full-opacity chrome).
+  public var uiGlassEffectDisabled: Bool
 
   public static let `default` = GlobalSettings(
     appearanceMode: .dark,
@@ -139,7 +142,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     confirmCloseSurface: true,
     terminateSessionsOnQuit: false,
     remoteSessionPersistenceEnabled: true,
-    appVisibility: .dockAndMenuBar
+    appVisibility: .dockAndMenuBar,
+    uiGlassEffectDisabled: false
   )
 
   public init(
@@ -177,7 +181,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     terminateSessionsOnQuit: Bool = false,
     remoteSessionPersistenceEnabled: Bool = true,
     appVisibility: AppVisibility = .dockAndMenuBar,
-    terminalHibernationEnabled: Bool = true
+    terminalHibernationEnabled: Bool = true,
+    uiGlassEffectDisabled: Bool = false
   ) {
     self.appearanceMode = appearanceMode
     self.defaultEditorID = defaultEditorID
@@ -214,6 +219,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.remoteSessionPersistenceEnabled = remoteSessionPersistenceEnabled
     self.appVisibility = appVisibility
     self.terminalHibernationEnabled = terminalHibernationEnabled
+    self.uiGlassEffectDisabled = uiGlassEffectDisabled
   }
 
   /// Keys for reading renamed settings fields that no longer
@@ -388,5 +394,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     terminalHibernationEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .terminalHibernationEnabled)
       ?? Self.default.terminalHibernationEnabled
+    // Pre-feature files omit this key; glass stays on unless explicitly disabled.
+    uiGlassEffectDisabled =
+      try container.decodeIfPresent(Bool.self, forKey: .uiGlassEffectDisabled)
+      ?? Self.default.uiGlassEffectDisabled
   }
 }

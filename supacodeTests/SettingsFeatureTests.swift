@@ -1118,6 +1118,30 @@ struct SettingsFeatureTests {
     return try JSONSerialization.data(withJSONObject: dict)
   }
 
+  // MARK: - UI glass effect.
+
+  @Test func uiGlassEffectDisabledDefaultsOff() {
+    #expect(!GlobalSettings.default.uiGlassEffectDisabled)
+  }
+
+  // Pre-feature settings files omit the key; decode must fall back to glass on
+  // instead of throwing (a throw would reset the whole file to defaults).
+  @Test func decodingWithoutGlassKeyKeepsGlassOn() throws {
+    let encoded = try JSONEncoder().encode(GlobalSettings.default)
+    var dict = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] ?? [:]
+    dict.removeValue(forKey: "uiGlassEffectDisabled")
+    let json = try JSONSerialization.data(withJSONObject: dict)
+    let settings = try JSONDecoder().decode(GlobalSettings.self, from: json)
+    #expect(!settings.uiGlassEffectDisabled)
+  }
+
+  @Test func decodingGlassKeyRoundTrips() throws {
+    var settings = GlobalSettings.default
+    settings.uiGlassEffectDisabled = true
+    let json = try JSONEncoder().encode(settings)
+    #expect(try JSONDecoder().decode(GlobalSettings.self, from: json).uiGlassEffectDisabled)
+  }
+
   // MARK: - AutomatedActionPolicy migration.
 
   @Test func decodingNewPolicyFieldIsUsed() throws {

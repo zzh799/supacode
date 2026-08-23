@@ -82,6 +82,7 @@ public struct SettingsFeature {
     public var remoteSessionPersistenceEnabled: Bool
     public var appVisibility: AppVisibility
     public var terminalHibernationEnabled: Bool
+    public var uiGlassEffectDisabled: Bool
     public var cliInstallState = CLIInstallState.checking
     /// Installed editors in menu order, resolved once off the picker's body.
     public var installedOpenActions: [OpenWorktreeAction]
@@ -162,6 +163,7 @@ public struct SettingsFeature {
       remoteSessionPersistenceEnabled = settings.remoteSessionPersistenceEnabled
       appVisibility = settings.appVisibility
       terminalHibernationEnabled = settings.terminalHibernationEnabled
+      uiGlassEffectDisabled = settings.uiGlassEffectDisabled
       defaultWorktreeBaseDirectoryPath =
         SupacodePaths.normalizedWorktreeBaseDirectoryPath(settings.defaultWorktreeBaseDirectoryPath) ?? ""
     }
@@ -204,7 +206,8 @@ public struct SettingsFeature {
         terminateSessionsOnQuit: terminateSessionsOnQuit,
         remoteSessionPersistenceEnabled: remoteSessionPersistenceEnabled,
         appVisibility: appVisibility,
-        terminalHibernationEnabled: terminalHibernationEnabled
+        terminalHibernationEnabled: terminalHibernationEnabled,
+        uiGlassEffectDisabled: uiGlassEffectDisabled
       )
     }
   }
@@ -358,6 +361,7 @@ public struct SettingsFeature {
         state.remoteSessionPersistenceEnabled = normalizedSettings.remoteSessionPersistenceEnabled
         state.appVisibility = normalizedSettings.appVisibility
         state.terminalHibernationEnabled = normalizedSettings.terminalHibernationEnabled
+        state.uiGlassEffectDisabled = normalizedSettings.uiGlassEffectDisabled
         state.defaultWorktreeBaseDirectoryPath = normalizedSettings.defaultWorktreeBaseDirectoryPath ?? ""
         state.syncGlobalDefaults(from: normalizedSettings)
         synchronizeRepositorySelection(for: &state)

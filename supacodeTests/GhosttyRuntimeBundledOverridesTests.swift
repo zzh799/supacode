@@ -97,4 +97,19 @@ struct GhosttyRuntimeBundledOverridesTests {
       #expect(line.contains("="), "Override line missing `=`: \(line)")
     }
   }
+
+  /// The glass-off directives must force full opacity and no blur, while the
+  /// default keeps the bundled frosted look (0.9 + blur on).
+  @Test func backgroundDirectivesToggleOpacityAndBlur() {
+    #expect(
+      GhosttyRuntime.backgroundDirectives(opacity: 0.9, blur: true) == """
+        background-opacity = 0.9
+        background-blur = true
+        """)
+    #expect(
+      GhosttyRuntime.backgroundDirectives(opacity: 1, blur: false) == """
+        background-opacity = 1
+        background-blur = false
+        """)
+  }
 }
