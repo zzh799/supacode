@@ -519,4 +519,68 @@ struct GhosttySurfaceViewTests {
     #expect(wrapper.safeAreaInsets.bottom == 0)
     #expect(wrapper.safeAreaInsets.right == 0)
   }
+
+  // MARK: - Re-attach repaint
+
+  /// A tab switch rebuilds the whole split subtree, so every surface view is
+  /// detached and re-added under a new scroll view. The frame is identical on
+  /// both sides, so no size change reaches Ghostty and nothing repaints the
+  /// freshly mounted layer — the pane renders as bare background until a split
+  /// drag happens to resize it.
+  @Test func firstMountDoesNotScheduleAReattachRepaint() {
+    let view = fixtureSurfaceView()
+    let window = fixtureWindow()
+
+    window.contentView?.addSubview(view)
+    view.layoutSubtreeIfNeeded()
+
+    // The surface is being sized from zero, which already paints it.
+    #expect(view.recordedRepaints == 0)
+  }
+
+  @Test func detachingDropsAnOwedReattachRepaint() {
+    let view = fixtureSurfaceView()
+    let window = fixtureWindow()
+    window.contentView?.addSubview(view)
+    view.removeFromSuperview()
+
+    #expect(view.window == nil)
+    view.flushReattachRepaint()
+    #expect(view.recordedRepaints == 0)
+  }
+
+  @Test func reattachingToAWindowRepaintsExactlyOnce() {
+    let view = fixtureSurfaceView()
+    let window = fixtureWindow()
+    window.contentView?.addSubview(view)
+    view.removeFromSuperview()
+
+    window.contentView?.addSubview(view)
+    view.layoutSubtreeIfNeeded()
+
+    #expect(view.recordedRepaints == 1)
+
+    // Paying the debt twice is a no-op, so the layout path and the async
+    // fallback can race without drawing extra frames.
+    view.flushReattachRepaint()
+    #expect(view.recordedRepaints == 1)
+  }
+
+  private func fixtureSurfaceView() -> GhosttySurfaceView {
+    GhosttySurfaceView(
+      id: UUID(),
+      runtime: GhosttyRuntime(),
+      workingDirectory: nil,
+      context: GHOSTTY_SURFACE_CONTEXT_TAB
+    )
+  }
+
+  private func fixtureWindow() -> NSWindow {
+    NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+      styleMask: [.titled],
+      backing: .buffered,
+      defer: false
+    )
+  }
 }

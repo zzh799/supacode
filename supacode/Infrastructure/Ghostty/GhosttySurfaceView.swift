@@ -156,6 +156,10 @@ final class GhosttySurfaceView: NSView, Identifiable {
   /// keeps the queue at most one deep without changing correctness (each Task
   /// is already idempotent on its own guards).
   private var pendingFocusClaim: Task<Void, Never>?
+  /// Set when a re-attach to a window owes the surface one repaint. Cleared by
+  /// `flushReattachRepaint`, so a re-attach draws at most one extra frame no
+  /// matter how many of the layout/async paths race to fulfil it.
+  private var needsRepaintAfterReattach = false
 
   private var accessibilityPaneIndexHelp: String?
 
@@ -451,7 +455,14 @@ final class GhosttySurfaceView: NSView, Identifiable {
       }
     }
     if window != nil {
+      // Only a re-attach (never the first mount) needs the forced repaint; the
+      // first mount already resizes the surface from zero, which paints it.
+      if hasBeenInWindow {
+        scheduleReattachRepaint()
+      }
       hasBeenInWindow = true
+    } else {
+      needsRepaintAfterReattach = false
     }
     updateScreenObservers()
     updateContentScale()
@@ -482,6 +493,10 @@ final class GhosttySurfaceView: NSView, Identifiable {
   override func layout() {
     super.layout()
     notifySizeChanged()
+    // The frame is settled here, so a re-attached surface repaints at its real
+    // size. The async fallback in `scheduleReattachRepaint` covers the case
+    // where AppKit never re-lays-out a view whose size didn't change.
+    flushReattachRepaint()
   }
 
   private func notifySizeChanged() {
@@ -490,6 +505,42 @@ final class GhosttySurfaceView: NSView, Identifiable {
     } else {
       updateSurfaceSize()
     }
+  }
+
+  /// Owes the surface one repaint because it was just re-attached to a window.
+  ///
+  /// A tab switch rebuilds the whole split subtree, so SwiftUI detaches every
+  /// `GhosttySurfaceView` and re-adds it under a brand new scroll view, which
+  /// hands Ghostty a fresh Metal layer with no content in it. The frame is
+  /// identical before and after, so `updateSurfaceSize` short-circuits on
+  /// `lastBackingSize` and Ghostty never sees a size change to react to: the
+  /// pane sits there as bare background until something else forces a frame.
+  /// That is why dragging a split divider appears to "fix" it — the drag is the
+  /// first thing to actually resize the surface.
+  private func scheduleReattachRepaint() {
+    needsRepaintAfterReattach = true
+    needsLayout = true
+    DispatchQueue.main.async { [weak self] in
+      MainActor.assumeIsolated { self?.flushReattachRepaint() }
+    }
+  }
+
+  /// Paints the frame a re-attach owes, at most once per re-attach.
+  func flushReattachRepaint() {
+    guard needsRepaintAfterReattach else { return }
+    needsRepaintAfterReattach = false
+    repaint()
+  }
+
+  /// Draws one frame synchronously on the main thread. Unlike the renderer
+  /// thread's normal path this ignores vsync and visibility gating, which is
+  /// exactly what a re-mounted layer needs.
+  private func repaint() {
+    #if DEBUG
+      recordedRepaints += 1
+    #endif
+    guard let surface else { return }
+    ghostty_surface_draw(surface)
   }
 
   override func updateTrackingAreas() {
@@ -1638,6 +1689,10 @@ final class GhosttySurfaceView: NSView, Identifiable {
     /// Records every `performBindingAction` call so tests can assert the
     /// binding was actually invoked (the C surface is nil under xctest).
     var recordedBindingActions: [String] = []
+
+    /// Counts repaint attempts so tests can assert a re-attach schedules
+    /// exactly one, without needing a live Ghostty surface to draw into.
+    var recordedRepaints: Int = 0
 
     /// Read-only responder-focus seam for the #757 activity tests.
     var isFocusedForTesting: Bool { focused }
