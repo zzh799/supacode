@@ -1,4 +1,5 @@
-import AppKit
+@preconcurrency import AppKit
+extension NSAttributedString: @unchecked Sendable {}
 import Carbon
 import CoreText
 import GhosttyKit
@@ -38,7 +39,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
-  private final class CachedValue<T> {
+  private final class CachedValue<T>: @unchecked Sendable {
     private var value: T?
     private let fetch: () -> T
     private let duration: Duration
@@ -61,7 +62,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
       let fetched = fetch()
       value = fetched
       expiryTask?.cancel()
-      expiryTask = Task { [weak self] in
+      expiryTask = Task { @MainActor [weak self] in
         guard let self else { return }
         try? await ContinuousClock().sleep(for: self.duration)
         guard !Task.isCancelled else { return }
@@ -298,28 +299,28 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   deinit {
-    if let eventMonitor {
-      NSEvent.removeMonitor(eventMonitor)
-    }
-    clearNotificationObservers()
-    let id = ObjectIdentifier(self)
     MainActor.assumeIsolated {
+      if let eventMonitor {
+        NSEvent.removeMonitor(eventMonitor)
+      }
+      clearNotificationObservers()
+      let id = ObjectIdentifier(self)
       SecureInput.shared.removeScoped(id)
-    }
-    // A live surface here means a teardown path bypassed `closeSurface`; the
-    // call below still frees it, off the turn.
-    if surface != nil {
-      assertionFailure("GhosttySurfaceView deallocated with a live surface; a teardown path bypassed closeSurface().")
-    }
-    closeSurface()
-    if let workingDirectoryCString {
-      free(workingDirectoryCString)
-    }
-    if let commandCString {
-      free(commandCString)
-    }
-    if let initialInputCString {
-      free(initialInputCString)
+      // A live surface here means a teardown path bypassed `closeSurface`; the
+      // call below still frees it, off the turn.
+      if surface != nil {
+        assertionFailure("GhosttySurfaceView deallocated with a live surface; a teardown path bypassed closeSurface().")
+      }
+      closeSurface()
+      if let workingDirectoryCString {
+        free(workingDirectoryCString)
+      }
+      if let commandCString {
+        free(commandCString)
+      }
+      if let initialInputCString {
+        free(initialInputCString)
+      }
     }
   }
 
@@ -1444,7 +1445,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
-  override func doCommand(by selector: Selector) {
+  nonisolated override func doCommand(by selector: Selector) { MainActor.assumeIsolated {
     if let lastPerformKeyEvent,
       let current = NSApp.currentEvent,
       lastPerformKeyEvent == current.timestamp
@@ -1460,7 +1461,8 @@ final class GhosttySurfaceView: NSView, Identifiable {
     default:
       break
     }
-  }
+  
+  }}
 
   override func menu(for event: NSEvent) -> NSMenu? {
     switch event.type {
@@ -1960,25 +1962,30 @@ extension GhosttySurfaceView {
 }
 
 extension GhosttySurfaceView: NSTextInputClient {
-  func hasMarkedText() -> Bool {
+  nonisolated func hasMarkedText() -> Bool { return MainActor.assumeIsolated {
     markedText.length > 0
-  }
+  
+  }}
 
-  func markedRange() -> NSRange {
+  nonisolated func markedRange() -> NSRange { return MainActor.assumeIsolated {
     guard markedText.length > 0 else { return NSRange() }
     return NSRange(location: 0, length: markedText.length)
-  }
+  
+  }}
 
-  func selectedRange() -> NSRange {
+  nonisolated func selectedRange() -> NSRange { return MainActor.assumeIsolated {
     guard let surface else { return NSRange() }
     var text = ghostty_text_s()
     guard ghostty_surface_read_selection(surface, &text) else { return NSRange() }
     defer { ghostty_surface_free_text(surface, &text) }
     return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
-  }
+  
+  }}
 
-  func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    switch string {
+  @preconcurrency nonisolated func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+    nonisolated(unsafe) let stringCopy = string
+    MainActor.assumeIsolated {
+    switch stringCopy {
     case let attributedText as NSAttributedString:
       markedText = NSMutableAttributedString(attributedString: attributedText)
     case let stringValue as String:
@@ -1989,23 +1996,26 @@ extension GhosttySurfaceView: NSTextInputClient {
     if keyTextAccumulator == nil {
       syncPreedit()
     }
-  }
+  
+  }}
 
-  func unmarkText() {
+  nonisolated func unmarkText() { MainActor.assumeIsolated {
     if markedText.length > 0 {
       markedText.mutableString.setString("")
       syncPreedit()
     }
-  }
+  
+  }}
 
-  func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+  nonisolated func validAttributesForMarkedText() -> [NSAttributedString.Key] { return MainActor.assumeIsolated {
     []
-  }
+  
+  }}
 
-  func attributedSubstring(
+  @preconcurrency nonisolated func attributedSubstring(
     forProposedRange range: NSRange,
     actualRange: NSRangePointer?
-  ) -> NSAttributedString? {
+  ) -> NSAttributedString? { return MainActor.assumeIsolated {
     guard let surface else { return nil }
     guard range.length > 0 else { return nil }
     var text = ghostty_text_s()
@@ -2018,13 +2028,15 @@ extension GhosttySurfaceView: NSTextInputClient {
       font.release()
     }
     return NSAttributedString(string: String(cString: text.text), attributes: attributes)
-  }
+  
+  }}
 
-  func characterIndex(for point: NSPoint) -> Int {
+  nonisolated func characterIndex(for point: NSPoint) -> Int { return MainActor.assumeIsolated {
     0
-  }
+  
+  }}
 
-  func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+  nonisolated func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect { return MainActor.assumeIsolated {
     guard let surface else {
       return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
     }
@@ -2057,13 +2069,16 @@ extension GhosttySurfaceView: NSTextInputClient {
     let winRect = convert(viewRect, to: nil)
     guard let window else { return winRect }
     return window.convertToScreen(winRect)
-  }
+  
+  }}
 
-  func insertText(_ string: Any, replacementRange: NSRange) {
+  @preconcurrency nonisolated func insertText(_ string: Any, replacementRange: NSRange) {
+    nonisolated(unsafe) let stringCopy = string
+    MainActor.assumeIsolated {
     guard NSApp.currentEvent != nil else { return }
     guard let surface else { return }
     var chars = ""
-    switch string {
+    switch stringCopy {
     case let attributedText as NSAttributedString:
       chars = attributedText.string
     case let stringValue as String:
@@ -2082,7 +2097,8 @@ extension GhosttySurfaceView: NSTextInputClient {
     chars.withCString { ptr in
       ghostty_surface_text(surface, ptr, UInt(len - 1))
     }
-  }
+  
+  }}
 }
 
 extension GhosttySurfaceView: NSServicesMenuRequestor {
@@ -2107,7 +2123,7 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     return super.validRequestor(forSendType: sendType, returnType: returnType)
   }
 
-  func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+  nonisolated func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool { return MainActor.assumeIsolated {
     guard let surface else { return false }
     var text = ghostty_text_s()
     guard ghostty_surface_read_selection(surface, &text) else { return false }
@@ -2115,7 +2131,8 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     pboard.declareTypes([.string], owner: nil)
     pboard.setString(String(cString: text.text), forType: .string)
     return true
-  }
+  
+  }}
 
   /// Sends raw text directly to the terminal PTY, bypassing the text input system.
   func sendText(_ text: String) {
@@ -2130,7 +2147,7 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     }
   }
 
-  func readSelection(from pboard: NSPasteboard) -> Bool {
+  nonisolated func readSelection(from pboard: NSPasteboard) -> Bool { return MainActor.assumeIsolated {
     guard let str = pboard.getOpinionatedStringContents() else { return false }
     let len = str.utf8CString.count
     if len == 0 { return true }
@@ -2138,7 +2155,8 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
       ghostty_surface_text(surface, ptr, UInt(len - 1))
     }
     return true
-  }
+  
+  }}
 }
 
 final class GhosttySurfaceScrollView: NSView, WindowTintMaskRegion {

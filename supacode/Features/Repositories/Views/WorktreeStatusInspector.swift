@@ -1,7 +1,7 @@
 import AppKit
 import ComposableArchitecture
 import SupacodeSettingsShared
-import SwiftUI
+@preconcurrency import SwiftUI
 
 /// Single inspector column whose content switches on the active pane.
 struct WorktreeStatusInspectorContainer: View {
@@ -572,35 +572,22 @@ private struct NotificationsInspectorContent: View {
     // `List` virtualizes rows (NSTableView), so a large backlog builds only the
     // on-screen rows on open, never the whole log or its markdown bodies.
     List {
-
       if isGrouped {
-        ForEach(groupedItems) { group in
-          Section {
-            ForEach(group.items) { notification in
-              NotificationRow(
-                notification: notification,
-                worktreeID: group.worktreeID,
-                source: nil,
-                onSelect: onSelectNotification,
-                onMarkRead: onMarkRead,
-                onDismiss: onDismiss
-              )
-            }
-          } header: {
-            NotificationGroupHeader(group: group)
-          }
-        }
+        GroupedNotificationsSections(
+          groupedItems: groupedItems,
+          onSelectNotification: onSelectNotification,
+          onMarkRead: onMarkRead,
+          onDismiss: onDismiss
+        )
       } else {
-        ForEach(items) { item in
-          NotificationRow(
-            notification: item.notification,
-            worktreeID: item.worktreeID,
-            source: scope == .all ? Self.rowSource(item, selectedWorktreeID: selectedWorktreeID) : nil,
-            onSelect: onSelectNotification,
-            onMarkRead: onMarkRead,
-            onDismiss: onDismiss
-          )
-        }
+        FlatNotificationsList(
+          items: items,
+          scope: scope,
+          selectedWorktreeID: selectedWorktreeID,
+          onSelectNotification: onSelectNotification,
+          onMarkRead: onMarkRead,
+          onDismiss: onDismiss
+        )
       }
       // One aggregate for evicted unread; timeless, so it sits at the bottom.
       if prunedCount > 0 {
@@ -613,31 +600,23 @@ private struct NotificationsInspectorContent: View {
     .scrollContentBackground(.hidden)
     // The header bar sits only over the list, so it scrolls under it for the
     // native top blur; the empty state reserves no bar.
-
     .safeAreaInset(edge: .top, spacing: 0) {
-      if !groups.isEmpty {
-        HStack {
-          Text("Notifications")
-            .font(.headline)
-          Spacer()
-          Button("Dismiss All", action: onDismissAll)
-            .buttonStyle(.borderless)
-            .disabled(count == 0 && unseenCount == 0)
-            .help("Dismiss all notifications.")
-        }
-        .padding(.horizontal)
-        .padding(.vertical)
+      if hasNotificationsAnywhere {
+        NotificationsInspectorHeader(
+          canAct: !isEmpty,
+          onMarkAllRead: onMarkAllRead,
+          onRequestDismissAll: { confirmingDismissAll = true }
+        )
       }
     }
-    // Empty state as a background so it fills the whole pane (past the safe area)
-    // instead of being offset by the reserved bar.
-    .background {
-      if groups.isEmpty {
-        ContentUnavailableView(
-          "No Notifications",
-          systemImage: "bell.slash",
-          description: Text("Agent and terminal notifications appear here.")
-
+    // Overlay, not background, so the Show All button stays hittable above the list.
+    .overlay {
+      if isEmpty {
+        NotificationsEmptyState(
+          scope: scope,
+          unreadOnly: unreadOnly,
+          hasNotificationsElsewhere: hasNotificationsAnywhere,
+          onClearFilters: onClearFilters
         )
       }
     }
@@ -681,6 +660,72 @@ private struct NotificationsInspectorContent: View {
       isFolder: item.isFolder,
       isSelectedWorktree: item.worktreeID == selectedWorktreeID
     )
+  }
+
+  // Extracted to avoid Swift 6.1 ChartContentBuilder regression when ForEach
+  // is nested inside Section/List on macOS 15.
+  fileprivate struct GroupedNotificationsSections: View {
+    let groupedItems: [GroupedNotifications]
+    let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+    let onMarkRead: (Worktree.ID, UUID) -> Void
+    let onDismiss: (Worktree.ID, UUID) -> Void
+
+    var body: some View {
+      ForEach(groupedItems) { group in
+        Section {
+          GroupedNotificationRows(
+            group: group,
+            onSelectNotification: onSelectNotification,
+            onMarkRead: onMarkRead,
+            onDismiss: onDismiss
+          )
+        } header: {
+          NotificationGroupHeader(group: group)
+        }
+      }
+    }
+  }
+
+  fileprivate struct GroupedNotificationRows: View {
+    let group: GroupedNotifications
+    let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+    let onMarkRead: (Worktree.ID, UUID) -> Void
+    let onDismiss: (Worktree.ID, UUID) -> Void
+
+    var body: some View {
+      ForEach(group.items) { notification in
+        NotificationRow(
+          notification: notification,
+          worktreeID: group.worktreeID,
+          source: nil,
+          onSelect: onSelectNotification,
+          onMarkRead: onMarkRead,
+          onDismiss: onDismiss
+        )
+      }
+    }
+  }
+
+  fileprivate struct FlatNotificationsList: View {
+    let items: [FlatNotificationItem]
+    let scope: NotificationScope
+    let selectedWorktreeID: Worktree.ID?
+    let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
+    let onMarkRead: (Worktree.ID, UUID) -> Void
+    let onDismiss: (Worktree.ID, UUID) -> Void
+
+    var body: some View {
+      ForEach(items) { item in
+        NotificationRow(
+          notification: item.notification,
+          worktreeID: item.worktreeID,
+          source: scope == .all ? NotificationsInspectorContent.rowSource(item, selectedWorktreeID: selectedWorktreeID) : nil,
+          onSelect: onSelectNotification,
+          onMarkRead: onMarkRead,
+          onDismiss: onDismiss
+        )
+      }
+    }
   }
 }
 

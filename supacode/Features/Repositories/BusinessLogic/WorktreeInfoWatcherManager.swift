@@ -6,7 +6,7 @@ import SupacodeSettingsShared
 
 private let watcherLogger = SupaLogger("WorktreeInfoWatcher")
 
-private final class WorktreeFileEventMonitor {
+private final class WorktreeFileEventMonitor: @unchecked Sendable {
   let rootURLs: [URL]
   private let onEvent: @MainActor @Sendable () -> Void
   private nonisolated(unsafe) var stream: FSEventStreamRef?

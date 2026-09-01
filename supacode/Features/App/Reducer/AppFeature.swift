@@ -2782,7 +2782,7 @@ struct AppFeature {
       // A pane anchor that resolves nothing must fail loudly, not fall back
       // to a pane the caller didn't ask for. The anchor is a pane token, so it
       // resolves a pane, tab, or content id (matching `createTabAsync`).
-      if let pane, !terminalClient.paneExists(worktreeID, pane) {
+      if let pane, !MainActor.assumeIsolated({ terminalClient.paneExists(worktreeID, pane) }) {
         deeplinkLogger.warning("Rejecting unknown pane anchor \(pane) in worktree \(worktreeID)")
         state.alert = AlertState {
           TextState("Pane not found")
@@ -2964,7 +2964,7 @@ struct AppFeature {
       guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return .none }
       // A single-tab or windowed pane refuses the move; report that instead of
       // a phantom success.
-      guard terminalClient.canMoveTabToNewSplit(worktreeID, tabID) else {
+      guard MainActor.assumeIsolated({ terminalClient.canMoveTabToNewSplit(worktreeID, tabID) }) else {
         deeplinkLogger.warning("Tab \(tabID) cannot move to a new split in worktree \(worktreeID)")
         state.alert = AlertState {
           TextState("Tab cannot be moved")
@@ -2994,8 +2994,8 @@ struct AppFeature {
       // (the runtime and hibernation key globally), or an in-flight split, so a
       // duplicate id can't have one split resolve the other's ack.
       if let id,
-        terminalClient.surfaceExistsInWorktree(worktreeID, id)
-          || terminalClient.idExistsAnywhere(id)
+        MainActor.assumeIsolated({ terminalClient.surfaceExistsInWorktree(worktreeID, id) })
+          || MainActor.assumeIsolated({ terminalClient.idExistsAnywhere(id) })
           || Self.hasPendingCreationAck(id: id, state: state)
       {
         state.alert = AlertState {
@@ -3821,7 +3821,7 @@ struct AppFeature {
     token: UUID,
     state: inout State
   ) -> Bool {
-    guard terminalClient.paneExists(worktreeID, token) else {
+    guard MainActor.assumeIsolated({ terminalClient.paneExists(worktreeID, token) }) else {
       deeplinkLogger.warning("Pane token \(token) not found in worktree \(worktreeID)")
       state.alert = AlertState {
         TextState("Pane not found")
@@ -3869,15 +3869,12 @@ struct AppFeature {
     // Surface-first: the tab segment is a hint. Migration moves surfaces
     // between tabs and long-running shells hold stale pairs by design, so a
     // resolvable surface is valid wherever it lives now.
-    if terminalClient.surfaceExistsInWorktree(worktreeID, surfaceID) {
+    if MainActor.assumeIsolated({ terminalClient.surfaceExistsInWorktree(worktreeID, surfaceID) }) {
       return true
     }
     guard validateTab(worktreeID: worktreeID, tabID: tabID, state: &state) else { return false }
-    let surfaceStillExists = MainActor.assumeIsolated {
-      terminalClient.surfaceExists(worktreeID, TabID(rawValue: tabID), surfaceID)
-    }
+    let surfaceStillExists = MainActor.assumeIsolated({ terminalClient.surfaceExists(worktreeID, TabID(rawValue: tabID), surfaceID) })
     guard surfaceStillExists else {
->>>>>>> upstream/main
       deeplinkLogger.warning("Surface \(surfaceID) not found in tab \(tabID) of worktree \(worktreeID)")
       state.alert = AlertState {
         TextState("Surface not found")

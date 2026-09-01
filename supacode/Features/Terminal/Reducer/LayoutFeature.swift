@@ -743,7 +743,7 @@ extension LayoutFeature {
     }
     // Post-relaunch the runtime is empty; rebuild the content from stored
     // state, whatever its kind.
-    let content = layoutContentFactory.make(
+    let content = MainActor.assumeIsolated { layoutContentFactory.make(
       ContentRequest(
         worktreeID: state.id,
         tabID: tabID,
@@ -752,7 +752,7 @@ extension LayoutFeature {
         origin: .restored,
         inheritedFrom: nil
       )
-    )
+    ) }
     guard contentRuntime.provision(content, at: geometry) else {
       Self.logger.warning("wakeTab provision refused for \(snapshot.id.rawValue)")
       return .none
@@ -897,7 +897,7 @@ extension LayoutFeature {
     let windowedPaneIDs = state.windowedPaneIDs
     let size = state.layout.tree.viewBounds { paneID in
       guard !windowedPaneIDs.contains(paneID), let selected = panes[id: paneID]?.selectedTab else { return .zero }
-      return contentRuntime.renderer(for: selected.content.id)?.bounds.size ?? .zero
+      return MainActor.assumeIsolated { contentRuntime.renderer(for: selected.content.id)?.bounds.size } ?? .zero
     }
     guard size.width >= 1, size.height >= 1 else {
       Self.logger.info("resize skipped: pane extents are degenerate.")
@@ -1016,7 +1016,7 @@ extension LayoutFeature {
     // Focusing a windowed pane happens in its own window; the main tree's
     // zoom must neither follow onto the placeholder nor clear.
     guard !state.windowedPaneIDs.contains(paneID) else { return }
-    guard splitZoomPolicy.preservesZoomOnNavigation(), let node = state.layout.tree.find(id: paneID.rawValue) else {
+    guard MainActor.assumeIsolated({ splitZoomPolicy.preservesZoomOnNavigation() }), let node = MainActor.assumeIsolated({ state.layout.tree.find(id: paneID.rawValue) }) else {
       state.layout.tree = state.layout.tree.settingZoomed(nil)
       return
     }
@@ -1107,7 +1107,7 @@ extension LayoutFeature {
     at geometry: ContentGeometry,
     operation: StaticString
   ) -> Bool {
-    let content = layoutContentFactory.make(request)
+    let content = MainActor.assumeIsolated { layoutContentFactory.make(request) }
     guard contentRuntime.provision(content, at: geometry) else {
       Self.logger.warning("\(operation) provision refused for content \(request.contentID.rawValue)")
       return false

@@ -23,38 +23,42 @@ final class ContentRuntime {
 
   /// Registers `content` and starts its session synchronously, exactly once.
   /// Refuses IDs that are tombstoned or already registered.
-  func provision(_ content: any TabContent, at geometry: ContentGeometry) -> Bool {
-    guard !pendingKill.contains(content.id) else {
-      Self.logger.warning("Refused provisioning tombstoned content \(content.id.rawValue)")
-      return false
+  nonisolated func provision(_ content: any TabContent, at geometry: ContentGeometry) -> Bool {
+    MainActor.assumeIsolated {
+      guard !pendingKill.contains(content.id) else {
+        Self.logger.warning("Refused provisioning tombstoned content \(content.id.rawValue)")
+        return false
+      }
+      guard contents[content.id] == nil else {
+        Self.logger.warning("Refused provisioning already-registered content \(content.id.rawValue)")
+        return false
+      }
+      contents[content.id] = content
+      content.startSession(at: geometry)
+      return true
     }
-    guard contents[content.id] == nil else {
-      Self.logger.warning("Refused provisioning already-registered content \(content.id.rawValue)")
-      return false
-    }
-    contents[content.id] = content
-    content.startSession(at: geometry)
-    return true
   }
 
   /// The registered content's renderer; nil when unknown or hibernated.
   /// Read-only: never creates.
-  func renderer(for id: ContentID) -> NSView? {
-    contents[id]?.renderer
+  nonisolated func renderer(for id: ContentID) -> NSView? {
+    MainActor.assumeIsolated { contents[id]?.renderer }
   }
 
   /// Spawn geometry for content created next to `id`: the source's mounted
   /// renderer, else the caller's deterministic fallback content, else the
   /// shared window/screen fallback chain.
-  func spawnGeometry(near id: ContentID?, fallback fallbackID: ContentID? = nil) -> ContentGeometry {
-    ContentGeometry.resolve(anchors: [
-      id.flatMap { contents[$0]?.renderer },
-      fallbackID.flatMap { contents[$0]?.renderer },
-    ])
+  nonisolated func spawnGeometry(near id: ContentID?, fallback fallbackID: ContentID? = nil) -> ContentGeometry {
+    MainActor.assumeIsolated {
+      ContentGeometry.resolve(anchors: [
+        id.flatMap { contents[$0]?.renderer },
+        fallbackID.flatMap { contents[$0]?.renderer },
+      ])
+    }
   }
 
-  func content(for id: ContentID) -> (any TabContent)? {
-    contents[id]
+  nonisolated func content(for id: ContentID) -> (any TabContent)? {
+    MainActor.assumeIsolated { contents[id] }
   }
 
   /// Unregisters and tears the content down; when `tombstone` is true the ID
@@ -63,18 +67,22 @@ final class ContentRuntime {
   /// reattach flow re-provisions the same content under its existing host,
   /// whose claim must stay current, and a stale entry can never block a
   /// fresh host, which claims on creation.
-  func remove(_ id: ContentID, tombstone: Bool) {
-    contents[id]?.tearDown()
-    contents[id] = nil
-    guard tombstone else { return }
-    pendingKill.insert(id)
+  nonisolated func remove(_ id: ContentID, tombstone: Bool) {
+    MainActor.assumeIsolated {
+      contents[id]?.tearDown()
+      contents[id] = nil
+      guard tombstone else { return }
+      pendingKill.insert(id)
+    }
   }
 
   /// Clears a tombstone once the async kill completed; the ID is provably
   /// dead here, so its render-host claim goes with it.
-  func confirmKill(_ id: ContentID) {
-    pendingKill.remove(id)
-    renderHostGenerations.removeValue(forKey: id)
+  nonisolated func confirmKill(_ id: ContentID) {
+    MainActor.assumeIsolated {
+      pendingKill.remove(id)
+      renderHostGenerations.removeValue(forKey: id)
+    }
   }
 
   /// Registers a new render host for the content and returns its claim token.

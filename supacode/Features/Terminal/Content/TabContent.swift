@@ -3,45 +3,45 @@ import AppKit
 /// A tab's live content: stable identity, a renderer once the session has
 /// started, and enough recorded state to snapshot across hibernation.
 @MainActor
-protocol TabContent: AnyObject {
-  var id: ContentID { get }
-  var kind: ContentKind { get }
+protocol TabContent: AnyObject, Sendable {
+  nonisolated var id: ContentID { get }
+  nonisolated var kind: ContentKind { get }
   /// The hosted view; nil until the session starts and while hibernated.
-  var renderer: NSView? { get }
+  nonisolated var renderer: NSView? { get }
   /// Whether closing now would interrupt real work (a terminal's foreground
   /// process); drives the busy-gated close confirmation.
-  var isBusy: Bool { get }
+  nonisolated var isBusy: Bool { get }
   /// Whether the renderer can be torn down with the session surviving (a
   /// terminal whose process lives in zmx).
-  var isHibernatable: Bool { get }
+  nonisolated var isHibernatable: Bool { get }
   /// Spawns the session eagerly at an explicit geometry; a second call while
   /// the renderer is alive is a no-op.
-  func startSession(at geometry: ContentGeometry)
+  nonisolated func startSession(at geometry: ContentGeometry)
   /// Tears down the renderer while the underlying session lives on, recording
   /// whatever the content needs to restore.
-  func hibernate()
+  nonisolated func hibernate()
   /// Releases the renderer and its live resources immediately on discard, so
   /// teardown runs at a deterministic point instead of a later dealloc.
-  func tearDown()
+  nonisolated func tearDown()
   /// Live, observable chrome for the tab strip; nil renders a bare tab.
-  var chrome: (any TabChrome)? { get }
+  nonisolated var chrome: (any TabChrome)? { get }
   /// Live, observable toolbar docked at the top of the content region; nil
   /// docks nothing.
   var toolbar: (any TabContentToolbar)? { get }
   /// The current persistable state, including restoration data.
-  func snapshot() -> ContentSnapshot
+  nonisolated func snapshot() -> ContentSnapshot
 }
 
 extension TabContent {
   // Most content is never busy; terminals override with their process state.
-  var isBusy: Bool { false }
+  nonisolated var isBusy: Bool { false }
   // Hibernation is opt-in: only content whose session outlives the renderer
   // may claim it.
-  var isHibernatable: Bool { false }
+  nonisolated var isHibernatable: Bool { false }
   // Renderless content has nothing to release.
-  func tearDown() {}
+  nonisolated func tearDown() {}
   // Chrome is opt-in per content kind.
-  var chrome: (any TabChrome)? { nil }
+  nonisolated var chrome: (any TabChrome)? { nil }
   // A docked toolbar is opt-in per content kind.
   var toolbar: (any TabContentToolbar)? { nil }
 }
@@ -98,15 +98,15 @@ final class InertTabContent: TabContent {
     self.state = state
   }
 
-  var kind: ContentKind { state.kind }
+  nonisolated var kind: ContentKind { state.kind }
 
-  var renderer: NSView? { nil }
+  nonisolated var renderer: NSView? { nil }
 
-  func startSession(at geometry: ContentGeometry) {}
+  nonisolated func startSession(at geometry: ContentGeometry) {}
 
-  func hibernate() {}
+  nonisolated func hibernate() {}
 
-  func snapshot() -> ContentSnapshot {
+  nonisolated func snapshot() -> ContentSnapshot {
     ContentSnapshot(id: id, state: state)
   }
 }
@@ -114,7 +114,7 @@ final class InertTabContent: TabContent {
 /// Terminal content backed by a Ghostty surface. The process itself lives in
 /// zmx, so hibernation only drops the renderer, never the session.
 @MainActor
-final class TerminalContent: TabContent {
+final class TerminalContent: TabContent, @unchecked Sendable {
   let id: ContentID
   let kind: ContentKind = .terminal
   /// Instance-owned so badges, progress, and locks survive hibernation.
@@ -122,7 +122,7 @@ final class TerminalContent: TabContent {
   /// Instance-owned so the docked find bar tracks this content's surface.
   private let searchToolbar: TerminalSearchToolbar
 
-  var chrome: (any TabChrome)? { terminalChrome }
+  nonisolated var chrome: (any TabChrome)? { MainActor.assumeIsolated { terminalChrome } }
   var toolbar: (any TabContentToolbar)? { searchToolbar }
 
   /// Which spawn a `makeSurface` call is; one-shot inheritance (source cwd,
@@ -160,51 +160,61 @@ final class TerminalContent: TabContent {
     self.searchToolbar = TerminalSearchToolbar(contentID: id)
   }
 
-  var renderer: NSView? { surfaceView }
+  nonisolated var renderer: NSView? { MainActor.assumeIsolated { surfaceView } }
 
   // Hibernated terminals have no live surface, so nothing is interruptible.
   // A locked tab (completed blocking script) parks its runner alive, so
   // Ghostty keeps reporting confirm-quit for work nothing can lose; the lock
   // is the gate, NOT Ghostty's read-only bit, which a user can toggle on a
   // genuinely busy terminal.
-  var isBusy: Bool {
-    guard let surfaceView, !terminalChrome.isReadOnly else { return false }
-    return surfaceView.needsCloseConfirmation
+  nonisolated var isBusy: Bool {
+    MainActor.assumeIsolated {
+      guard let surfaceView, !terminalChrome.isReadOnly else { return false }
+      return surfaceView.needsCloseConfirmation
+    }
   }
 
   // Only a zmx-backed live surface can drop its renderer and reattach.
-  var isHibernatable: Bool { surfaceView != nil && usesZmx }
+  nonisolated var isHibernatable: Bool { MainActor.assumeIsolated { surfaceView != nil && usesZmx } }
 
-  func startSession(at geometry: ContentGeometry) {
-    guard surfaceView == nil else { return }
-    let spawned = makeSurface(geometry, state, hasSpawned ? .rewake : .first)
-    surfaceView = spawned.view
-    searchToolbar.surfaceView = spawned.view
-    usesZmx = spawned.usesZmx
-    hasSpawned = true
+  nonisolated func startSession(at geometry: ContentGeometry) {
+    MainActor.assumeIsolated {
+      guard surfaceView == nil else { return }
+      let spawned = makeSurface(geometry, state, hasSpawned ? .rewake : .first)
+      surfaceView = spawned.view
+      searchToolbar.surfaceView = spawned.view
+      usesZmx = spawned.usesZmx
+      hasSpawned = true
+    }
   }
 
-  func hibernate() {
-    guard let surfaceView else { return }
-    state = recordedState(from: surfaceView)
-    surfaceView.closeSurface()
-    self.surfaceView = nil
-    searchToolbar.surfaceView = nil
+  nonisolated func hibernate() {
+    MainActor.assumeIsolated {
+      guard let surfaceView else { return }
+      state = recordedState(from: surfaceView)
+      surfaceView.closeSurface()
+      self.surfaceView = nil
+      searchToolbar.surfaceView = nil
+    }
   }
 
   // Free the Ghostty surface at event time: deferring to the view's dealloc
   // would run it mid-render when SwiftUI drops the last reference.
-  func tearDown() {
-    surfaceView?.closeSurface()
-    surfaceView = nil
-    searchToolbar.surfaceView = nil
+  nonisolated func tearDown() {
+    MainActor.assumeIsolated {
+      surfaceView?.closeSurface()
+      surfaceView = nil
+      searchToolbar.surfaceView = nil
+    }
   }
 
-  func snapshot() -> ContentSnapshot {
-    guard let surfaceView else {
-      return ContentSnapshot(id: id, state: .terminal(state))
+  nonisolated func snapshot() -> ContentSnapshot {
+    MainActor.assumeIsolated {
+      guard let surfaceView else {
+        return ContentSnapshot(id: id, state: .terminal(state))
+      }
+      return ContentSnapshot(id: id, state: .terminal(recordedState(from: surfaceView)))
     }
-    return ContentSnapshot(id: id, state: .terminal(recordedState(from: surfaceView)))
   }
 
   // Live values when the surface can report them, else the last recorded ones.

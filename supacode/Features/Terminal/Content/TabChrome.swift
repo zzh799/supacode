@@ -52,8 +52,8 @@ enum TabTitle {
 @MainActor
 @Observable
 final class TerminalTabChrome: TabChrome {
-  var agents: [AgentPresenceFeature.AgentInstance] = []
-  var isWorking = false
+  nonisolated(unsafe) var agents: [AgentPresenceFeature.AgentInstance] = []
+  nonisolated(unsafe) var isWorking = false
   var progress: TerminalTabProgressDisplay?
   var isReadOnly = false
   var reportedTitle: String?

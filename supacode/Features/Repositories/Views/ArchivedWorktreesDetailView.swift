@@ -39,31 +39,7 @@ struct ArchivedWorktreesDetailView: View {
         ForEach(Array(groups.enumerated()), id: \.element.repository.id) { index, group in
           Section {
             if !collapsedRepositoryIDs.contains(group.repository.id) {
-              ForEach(group.worktrees, id: \.id) { worktree in
-                ArchivedWorktreeRowView(
-                  worktree: worktree,
-                  pullRequest: store.state.sidebarItems[id: worktree.id]?.pullRequest,
-                  customTitle: store.state.sidebarItems[id: worktree.id]?.customTitle,
-                  customTint: store.state.sidebarItems[id: worktree.id]?.customTint,
-                  onUnarchive: {
-                    store.send(.unarchiveWorktree(worktree.id))
-                  },
-                  onDelete: {
-                    store.send(
-                      .requestDeleteSidebarItems([
-                        RepositoriesFeature.DeleteWorktreeTarget(
-                          worktreeID: worktree.id,
-                          repositoryID: group.repository.id
-                        )
-                      ])
-                    )
-                  }
-                )
-                .tag(worktree.id)
-                .typeSelectEquivalent("")
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-              }
+              ArchivedWorktreeRowsView(group: group, store: store)
             }
           } header: {
             ArchivedWorktreeSectionHeader(
@@ -123,6 +99,41 @@ struct ArchivedWorktreesDetailView: View {
       } else {
         collapsedRepositoryIDs.insert(repositoryID)
       }
+    }
+  }
+}
+
+// Extracted to avoid Swift 6.1 ChartContentBuilder regression when ForEach
+// is nested inside Section/List on macOS 15.
+private struct ArchivedWorktreeRowsView: View {
+  let group: (repository: Repository, worktrees: [Worktree])
+  let store: StoreOf<RepositoriesFeature>
+
+  var body: some View {
+    ForEach(group.worktrees, id: \.id) { worktree in
+      ArchivedWorktreeRowView(
+        worktree: worktree,
+        pullRequest: store.state.sidebarItems[id: worktree.id]?.pullRequest,
+        customTitle: store.state.sidebarItems[id: worktree.id]?.customTitle,
+        customTint: store.state.sidebarItems[id: worktree.id]?.customTint,
+        onUnarchive: {
+          store.send(.unarchiveWorktree(worktree.id))
+        },
+        onDelete: {
+          store.send(
+            .requestDeleteSidebarItems([
+              RepositoriesFeature.DeleteWorktreeTarget(
+                worktreeID: worktree.id,
+                repositoryID: group.repository.id
+              )
+            ])
+          )
+        }
+      )
+      .tag(worktree.id)
+      .typeSelectEquivalent("")
+      .listRowInsets(EdgeInsets())
+      .listRowSeparator(.hidden)
     }
   }
 }

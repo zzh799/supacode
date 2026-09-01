@@ -90,14 +90,9 @@ private struct InstalledAgentsSection: View {
   let agents: [SkillAgent]
 
   var body: some View {
-    Section {
-      ForEach(agents, id: \.self) { agent in
-        AgentIntegrationRow(
-          agent: agent,
-          state: store.agentIntegrationStates[agent] ?? .checking,
-          installAction: { store.send(.agentIntegrationInstallTapped(agent)) },
-          uninstallAction: { store.send(.agentIntegrationUninstallTapped(agent)) }
-        )
+    ForEach(agents, id: \.self) { agent in
+      Section {
+        AgentIntegrationRow(agent: agent, store: store)
       }
     }
   }

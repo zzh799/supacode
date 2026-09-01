@@ -486,13 +486,7 @@ extension RepositoriesFeature.Action {
     case .archiveWorktreeCommit, .unarchiveWorktree,
       .deleteWorktreeApply, .worktreeDeleted,
       .createWorktreeInRepository, .createRandomWorktreeInRepository,
-      .autoDeleteExpiredArchivedWorktrees,
-      // Deferred post-confirm mutation arms. The alert-confirm arms they
-      // follow only clear the alert and schedule these after the sheet-close
-      // animation (see `sidebarAlertDismissalDeferral`); the actual
-      // `removingRepositoryIDs` seeding + `syncSidebar` (or lifecycle flip)
-      // lives here, so the invalidation rides along with the mutation.
-      .deleteSidebarItemsConfirmed, .repositoryRemovalRequested:
+      .autoDeleteExpiredArchivedWorktrees:
       return .allSidebar
 
     // `worktreeInfoEvent` is a pure effect-launcher (HEAD watcher tick): the
