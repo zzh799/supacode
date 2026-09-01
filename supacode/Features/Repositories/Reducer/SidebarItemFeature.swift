@@ -94,9 +94,10 @@ struct SidebarItemFeature {
 
     var addedLines: Int?
     var removedLines: Int?
-    var pullRequest: GithubPullRequest?
+    var pullRequest: ForgePullRequest?
     /// Branch name at PR-query start; on result land, mismatched results are dropped.
-    /// Invariant: non-nil iff a PR query is in flight; cleared by reconcile on branch rename.
+    /// Cleared by the next row dispatch or reconcile; may linger after a refresh
+    /// that failed before dispatching rows.
     var pullRequestBranchAtQueryTime: String?
 
     var runningScripts: IdentifiedArrayOf<RunningScript> = []
@@ -141,7 +142,8 @@ struct SidebarItemFeature {
     case lifecycleChanged(State.Lifecycle)
     case diffStatsChanged(added: Int?, removed: Int?)
     case pullRequestQueryStarted(branch: String)
-    case pullRequestChanged(GithubPullRequest?, branchAtQueryTime: String)
+    case pullRequestChanged(ForgePullRequest?, branchAtQueryTime: String)
+    case pullRequestDetailApplied(pullRequestNumber: Int, ForgePullRequestDetail)
     case agentSnapshotChanged(AgentPresenceFeature.RowSnapshot)
     case terminalProjectionChanged(WorktreeRowProjection)
     case dragSessionChanged(isDragging: Bool)
@@ -171,14 +173,27 @@ struct SidebarItemFeature {
       case .pullRequestChanged(let pullRequest, let branchAtQueryTime):
         // Drop late results for a branch the row no longer represents.
         guard branchAtQueryTime == state.branchName else { return .none }
-        guard state.pullRequest != pullRequest else {
+        let incoming = Self.preservingEnrichment(of: pullRequest, over: state.pullRequest)
+        guard state.pullRequest != incoming else {
           if state.pullRequestBranchAtQueryTime != nil {
             state.pullRequestBranchAtQueryTime = nil
           }
           return .none
         }
-        state.pullRequest = pullRequest
+        state.pullRequest = incoming
         state.pullRequestBranchAtQueryTime = nil
+        return .none
+
+      case .pullRequestDetailApplied(let pullRequestNumber, let detail):
+        // Detail enrichment never arms or clears the branch watermark, and its
+        // payload type carries no state or merge timestamp, so it can never
+        // influence the merged-worktree transition.
+        guard let pullRequest = state.pullRequest, pullRequest.number == pullRequestNumber else {
+          return .none
+        }
+        let enriched = pullRequest.applying(detail)
+        guard state.pullRequest != enriched else { return .none }
+        state.pullRequest = enriched
         return .none
 
       case .agentSnapshotChanged(let snapshot):
@@ -259,14 +274,28 @@ enum SidebarDisplayName {
   ) -> String? {
     guard !isMainWorktree else { return nil }
     if id.rawValue.contains("/") {
-      let pathName = URL(fileURLWithPath: id.rawValue).lastPathComponent
+      let pathName = lastPathComponent(of: id.rawValue)
       if !pathName.isEmpty { return pathName }
     }
     if let subtitle, !subtitle.isEmpty, subtitle != "." {
-      let detailName = URL(fileURLWithPath: subtitle).lastPathComponent
+      let detailName = lastPathComponent(of: subtitle)
       if !detailName.isEmpty, detailName != "." { return detailName }
     }
     return branchName
+  }
+
+  /// Lexical `lastPathComponent`: no URL synthesis, since remote row ids are
+  /// relative strings that `fileURLWithPath` would resolve against the cwd and
+  /// stat on every per-tick recompute (gh-764).
+  private static func lastPathComponent(of path: String) -> String {
+    var trimmed = Substring(path)
+    while trimmed.count > 1, trimmed.hasSuffix("/") {
+      trimmed = trimmed.dropLast()
+    }
+    guard let slash = trimmed.lastIndex(of: "/"), trimmed.index(after: slash) < trimmed.endIndex else {
+      return String(trimmed)
+    }
+    return String(trimmed[trimmed.index(after: slash)...])
   }
 
   /// Returns `custom` when set (after trim), otherwise `fallback`. Shared so
@@ -328,7 +357,7 @@ struct SelectedWorktreeSlice: Equatable, Sendable {
   let customTitle: String?
   let customTint: RepositoryColor?
   let lifecycle: SidebarItemFeature.State.Lifecycle
-  let pullRequest: GithubPullRequest?
+  let pullRequest: ForgePullRequest?
   let runningScripts: IdentifiedArrayOf<SidebarItemFeature.State.RunningScript>
 
   init(_ row: SidebarItemFeature.State) {
@@ -419,5 +448,33 @@ struct SidebarSelectionSlice: Equatable, Sendable {
   func contextRows(rightClicked row: SidebarContextRow) -> [SidebarContextRow] {
     guard rows.count > 1, rows.contains(where: { $0.id == row.id }) else { return [row] }
     return rows
+  }
+}
+
+extension SidebarItemFeature {
+  /// A rollup-at-most summary for a provably unchanged proposal keeps the
+  /// enrichment (fresh rollup still wins); any server-side movement drops it.
+  nonisolated static func preservingEnrichment(
+    of summary: ForgePullRequest?,
+    over existing: ForgePullRequest?
+  ) -> ForgePullRequest? {
+    guard let existing, let summary,
+      existing.number == summary.number,
+      existing.state == summary.state,
+      summary.state == .open,
+      existing.updatedAt == summary.updatedAt,
+      summary.detail == ForgePullRequestDetail(statusCheckRollup: summary.statusCheckRollup)
+    else {
+      return summary
+    }
+    return summary.applying(
+      ForgePullRequestDetail(
+        mergeable: existing.mergeable,
+        mergeStateStatus: existing.mergeStateStatus,
+        reviewDecision: existing.reviewDecision,
+        statusCheckRollup: summary.statusCheckRollup ?? existing.statusCheckRollup,
+        forgeBlockedReason: existing.forgeBlockedReason
+      )
+    )
   }
 }

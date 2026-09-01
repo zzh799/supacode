@@ -5,22 +5,24 @@ import Foundation
 /// `KimiHookSettingsFileInstaller`. Kimi activates hooks purely from
 /// `~/.kimi-code/config.toml`, so there is no version probe and no feature flag.
 nonisolated struct KimiSettingsInstaller {
-  let homeDirectoryURL: URL
+  let configDirectoryURL: URL
   let fileManager: FileManager
 
   init(
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+    configDirectoryURL: URL? = nil,
     fileManager: FileManager = .default,
   ) {
-    self.homeDirectoryURL = homeDirectoryURL
+    self.configDirectoryURL =
+      configDirectoryURL ?? homeDirectoryURL.appending(path: ".kimi-code", directoryHint: .isDirectory)
     self.fileManager = fileManager
   }
 
   /// Install state for the unified hook map. See
   /// `ClaudeSettingsInstaller.installState()` for rationale.
-  func installState() -> ComponentInstallState {
+  func installState() throws -> ComponentInstallState {
     let entries = KimiHookSettings.canonicalEntries()
-    return fileInstaller.installState(
+    return try fileInstaller.installState(
       settingsURL: settingsURL,
       canonicalEntries: entries,
     )
@@ -39,7 +41,7 @@ nonisolated struct KimiSettingsInstaller {
   // MARK: - Paths.
 
   private var settingsURL: URL {
-    Self.settingsURL(homeDirectoryURL: homeDirectoryURL)
+    configDirectoryURL.appending(path: "config.toml", directoryHint: .notDirectory)
   }
 
   static func settingsURL(homeDirectoryURL: URL) -> URL {

@@ -67,7 +67,10 @@ struct ArchivedWorktreesDetailView: View {
             }
           } header: {
             ArchivedWorktreeSectionHeader(
-              name: group.repository.name,
+              name: Repository.sidebarDisplayName(
+                custom: store.state.sidebar.customTitle(for: group.repository),
+                fallback: group.repository.name
+              ),
               worktreeCount: group.worktrees.count,
               isCollapsed: collapsedRepositoryIDs.contains(group.repository.id),
               showsTopSeparator: index > 0,
@@ -137,16 +140,16 @@ private struct ArchivedWorktreeSectionHeader: View {
     } label: {
       HStack(spacing: 6) {
         Image(systemName: "chevron.right")
-          .font(.caption2)
+          .appFont(.caption2)
           .rotationEffect(.degrees(isCollapsed ? 0 : 90))
           .foregroundStyle(.secondary)
           .accessibilityHidden(true)
         Text(name)
-          .font(.headline)
+          .appFont(.headline)
           .foregroundStyle(.primary)
           .lineLimit(1)
         Text("(\(worktreeCount))")
-          .font(.headline)
+          .appFont(.headline)
           .foregroundStyle(.secondary)
         Spacer()
       }

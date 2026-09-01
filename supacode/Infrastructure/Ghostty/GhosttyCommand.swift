@@ -27,3 +27,27 @@ struct GhosttyCommand: Equatable, Sendable {
     )
   }
 }
+
+extension GhosttyCommand {
+  private static let topologyActionPrefixes = [
+    "new_tab", "close_tab", "goto_tab", "move_tab",
+    "new_split", "goto_split", "resize_split", "equalize_splits", "toggle_split_zoom",
+    "new_window", "close_window", "close_all_windows", "toggle_tab_overview",
+  ]
+
+  private static let searchActionPrefixes = [
+    "start_search", "end_search", "navigate_search", "search_selection", "toggle_search",
+  ]
+
+  /// Whether the command would drive layout topology; the app owns those
+  /// commands, and the conduit ignores their surface-emitted actions.
+  var isTopologyCommand: Bool {
+    Self.topologyActionPrefixes.contains { action == $0 || action.hasPrefix($0 + ":") }
+  }
+
+  /// Whether the command drives terminal search; the app owns Find through its
+  /// own menu and chords, so the Ghostty entry is dropped from the palette.
+  var isSearchCommand: Bool {
+    Self.searchActionPrefixes.contains { action == $0 || action.hasPrefix($0 + ":") }
+  }
+}

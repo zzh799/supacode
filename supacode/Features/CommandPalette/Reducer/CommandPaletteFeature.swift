@@ -65,6 +65,8 @@ struct CommandPaletteFeature {
     case viewArchivedWorktrees
     case refreshWorktrees
     case ghosttyCommand(String)
+    case toggleWindowMode
+    case layoutCommand(LayoutPaletteCommand)
     case openPullRequest(Worktree.ID)
     case markPullRequestReady(Worktree.ID)
     case mergePullRequest(Worktree.ID)
@@ -279,17 +281,37 @@ struct CommandPaletteFeature {
     if repositories.selectedWorktreeID != nil {
       items.append(contentsOf: ghosttyCommandItems(ghosttyCommands))
       items.append(contentsOf: scriptItems(scripts: scripts, runningScriptIDs: runningScriptIDs))
+      items.append(
+        CommandPaletteItem(
+          id: CommandPaletteItemID.toggleWindowMode,
+          title: "Toggle Window Mode",
+          subtitle: "Move the focused pane to its own window, or back",
+          kind: .toggleWindowMode
+        )
+      )
+      for command in LayoutPaletteCommand.allCases {
+        items.append(
+          CommandPaletteItem(
+            id: CommandPaletteItemID.layoutCommand(command),
+            title: command.title,
+            subtitle: nil,
+            kind: .layoutCommand(command)
+          )
+        )
+      }
     }
     if let selectedWorktreeID = repositories.selectedWorktreeID,
       let repositoryID = repositories.repositoryID(containing: selectedWorktreeID),
       let pullRequest = repositories.sidebarItems[id: selectedWorktreeID]?.pullRequest,
       pullRequest.number > 0,
-      pullRequest.state.uppercased() != "CLOSED"
+      pullRequest.state != .closed
     {
+      let capabilities = repositories.forgeCapabilities(for: repositoryID)
       let pullRequestActions = pullRequestItems(
         pullRequest: pullRequest,
         worktreeID: selectedWorktreeID,
-        repositoryID: repositoryID
+        repositoryID: repositoryID,
+        capabilities: capabilities
       )
       items.append(contentsOf: pullRequestActions)
     }
@@ -320,10 +342,7 @@ struct CommandPaletteFeature {
     else {
       return nil
     }
-    let repositoryName = Repository.sidebarDisplayName(
-      custom: repositories.sidebar.sections[selectedRepositoryID]?.title,
-      fallback: repositories.repositoryName(for: selectedRepositoryID) ?? "Repository"
-    )
+    let repositoryName = repositories.repositoryName(for: selectedRepositoryID) ?? "Repository"
     let worktreeDisplayName =
       SidebarDisplayName.resolved(custom: selectedRow.customTitle, fallback: selectedRow.name)
       ?? selectedRow.name
@@ -389,10 +408,7 @@ struct CommandPaletteFeature {
     // Repository-level appearance for git repos (folder repos have no section
     // header to tint). Hidden mid-removal, matching the disabled sidebar entry.
     if isGitRepository, repositories.removingRepositoryIDs[selectedRepositoryID] == nil {
-      let repositoryName = Repository.sidebarDisplayName(
-        custom: section?.title,
-        fallback: repositories.repositoryName(for: selectedRepositoryID) ?? "Repository"
-      )
+      let repositoryName = repositories.repositoryName(for: selectedRepositoryID) ?? "Repository"
       items.append(
         CommandPaletteItem(
           id: CommandPaletteItemID.customizeRepositoryAppearance(selectedRepositoryID),
@@ -411,6 +427,8 @@ struct CommandPaletteFeature {
     scripts: [ScriptDefinition] = []
   ) -> [CommandPaletteItem.ID] {
     var ids = CommandPaletteItemID.globalIDs
+    ids.append(CommandPaletteItemID.toggleWindowMode)
+    ids.append(contentsOf: LayoutPaletteCommand.allCases.map(CommandPaletteItemID.layoutCommand))
     for repository in repositories {
       ids.append(contentsOf: CommandPaletteItemID.pullRequestIDs(repositoryID: repository.id))
       ids.append(CommandPaletteItemID.customizeRepositoryAppearance(repository.id))
@@ -489,10 +507,7 @@ struct CommandPaletteFeature {
       // row. Git rows tint the worktree name over the repo name; folders collapse
       // to their own name with no subtitle; the host stays a distinct badge.
       let repoColor = section?.color
-      let repositoryName = Repository.sidebarDisplayName(
-        custom: section?.title,
-        fallback: resolvedRepositoryName ?? "Repository"
-      )
+      let repositoryName = resolvedRepositoryName ?? "Repository"
       let hostInfo = row.host?.displayAuthority
       // Mirror the sidebar's leading glyph. Missing wins over folder wins over
       // the pull-request icon, matching `IconContent`; rows are idle-only here.
@@ -517,7 +532,7 @@ struct CommandPaletteFeature {
         // Fall back to the row's own name (never a generic constant) so a
         // not-yet-loaded remote folder stays identifiable as its whole title.
         title = Repository.sidebarDisplayName(
-          custom: section?.title ?? row.customTitle,
+          custom: row.customTitle ?? section?.title,
           fallback: resolvedRepositoryName ?? row.name
         )
         subtitle = nil
@@ -541,24 +556,27 @@ struct CommandPaletteFeature {
 }
 
 private func pullRequestItems(
-  pullRequest: GithubPullRequest,
+  pullRequest: ForgePullRequest,
   worktreeID: Worktree.ID,
-  repositoryID: Repository.ID
+  repositoryID: Repository.ID,
+  capabilities: ForgeCapabilities
 ) -> [CommandPaletteItem] {
-  let state = pullRequest.state.uppercased()
-  let isOpen = state == "OPEN"
+  let vocabulary = capabilities.vocabulary
+  let isOpen = pullRequest.state == .open
   let isDraft = pullRequest.isDraft
   let mergeReadiness = PullRequestMergeReadiness(pullRequest: pullRequest)
   let checks = pullRequest.statusCheckRollup?.checks ?? []
   let breakdown = PullRequestCheckBreakdown(checks: checks)
   let hasFailingChecks = breakdown.failed > 0
-  let canMerge = isOpen && !isDraft && !mergeReadiness.isBlocking
+  // Permissive on purpose: merge stays offered while mergeability is still
+  // computing; only a confirmed block hides it.
+  let canMerge = isOpen && !isDraft && mergeReadiness.blockingReason == nil
 
   func makeReadyItem() -> CommandPaletteItem? {
-    guard isOpen && isDraft else { return nil }
+    guard isOpen && isDraft && capabilities.canMarkReady else { return nil }
     return CommandPaletteItem(
       id: CommandPaletteItemID.pullRequestReady(repositoryID),
-      title: "Mark PR Ready for Review",
+      title: "Mark \(vocabulary.abbreviation) Ready for Review",
       subtitle: pullRequest.title,
       kind: .markPullRequestReady(worktreeID),
       priorityTier: 0
@@ -582,24 +600,28 @@ private func pullRequestItems(
         )
       )
     }
-    failingItems.append(
-      CommandPaletteItem(
-        id: CommandPaletteItemID.pullRequestCopyCiLogs(repositoryID),
-        title: "Copy CI Failure Logs",
-        subtitle: pullRequest.title,
-        kind: .copyCiFailureLogs(worktreeID),
-        priorityTier: hasFailingCheckWithDetails ? followupTier : leadingTier
+    if capabilities.canCopyCIFailureLogs {
+      failingItems.append(
+        CommandPaletteItem(
+          id: CommandPaletteItemID.pullRequestCopyCiLogs(repositoryID),
+          title: "Copy CI Failure Logs",
+          subtitle: pullRequest.title,
+          kind: .copyCiFailureLogs(worktreeID),
+          priorityTier: hasFailingCheckWithDetails ? followupTier : leadingTier
+        )
       )
-    )
-    failingItems.append(
-      CommandPaletteItem(
-        id: CommandPaletteItemID.pullRequestRerunFailedJobs(repositoryID),
-        title: "Re-run Failed Jobs",
-        subtitle: pullRequest.title,
-        kind: .rerunFailedJobs(worktreeID),
-        priorityTier: followupTier
+    }
+    if capabilities.canRerunChecks {
+      failingItems.append(
+        CommandPaletteItem(
+          id: CommandPaletteItemID.pullRequestRerunFailedJobs(repositoryID),
+          title: "Re-run Failed Jobs",
+          subtitle: pullRequest.title,
+          kind: .rerunFailedJobs(worktreeID),
+          priorityTier: followupTier
+        )
       )
-    )
+    }
     if hasFailingCheckWithDetails {
       failingItems.append(
         CommandPaletteItem(
@@ -615,13 +637,9 @@ private func pullRequestItems(
   }
 
   var items: [CommandPaletteItem] = [
-    CommandPaletteItem(
-      id: CommandPaletteItemID.pullRequestOpen(repositoryID),
-      title: "Open PR on GitHub",
-      subtitle: pullRequest.title,
-      kind: .openPullRequest(worktreeID),
-      priorityTier: 2
-    )
+    makeOpenPullRequestItem(
+      pullRequestTitle: pullRequest.title, repositoryID: repositoryID,
+      worktreeID: worktreeID, vocabulary: vocabulary)
   ]
 
   if let readyItem = makeReadyItem() {
@@ -634,7 +652,8 @@ private func pullRequestItems(
     canMerge: canMerge,
     breakdown: breakdown,
     repositoryID: repositoryID,
-    worktreeID: worktreeID
+    worktreeID: worktreeID,
+    vocabulary: vocabulary
   ) {
     items.append(mergeItem)
   }
@@ -643,7 +662,8 @@ private func pullRequestItems(
     isOpen: isOpen,
     repositoryID: repositoryID,
     worktreeID: worktreeID,
-    pullRequestTitle: pullRequest.title
+    pullRequestTitle: pullRequest.title,
+    vocabulary: vocabulary
   ) {
     items.append(closeItem)
   }
@@ -651,11 +671,27 @@ private func pullRequestItems(
   return items
 }
 
+private func makeOpenPullRequestItem(
+  pullRequestTitle: String,
+  repositoryID: Repository.ID,
+  worktreeID: Worktree.ID,
+  vocabulary: ForgeVocabulary
+) -> CommandPaletteItem {
+  CommandPaletteItem(
+    id: CommandPaletteItemID.pullRequestOpen(repositoryID),
+    title: "Open \(vocabulary.abbreviation) on \(vocabulary.destinationName)",
+    subtitle: pullRequestTitle,
+    kind: .openPullRequest(worktreeID),
+    priorityTier: 2
+  )
+}
+
 private func makeMergePullRequestItem(
   canMerge: Bool,
   breakdown: PullRequestCheckBreakdown,
   repositoryID: Repository.ID,
-  worktreeID: Worktree.ID
+  worktreeID: Worktree.ID,
+  vocabulary: ForgeVocabulary
 ) -> CommandPaletteItem? {
   guard canMerge else { return nil }
   let successfulChecks = breakdown.passed
@@ -665,7 +701,7 @@ private func makeMergePullRequestItem(
     : "\(successfulChecks) successful checks"
   return CommandPaletteItem(
     id: CommandPaletteItemID.pullRequestMerge(repositoryID),
-    title: "Merge PR",
+    title: "Merge \(vocabulary.abbreviation)",
     subtitle: "Merge Ready - \(successfulChecksLabel)",
     kind: .mergePullRequest(worktreeID),
     priorityTier: 0
@@ -676,12 +712,13 @@ private func makeClosePullRequestItem(
   isOpen: Bool,
   repositoryID: Repository.ID,
   worktreeID: Worktree.ID,
-  pullRequestTitle: String
+  pullRequestTitle: String,
+  vocabulary: ForgeVocabulary
 ) -> CommandPaletteItem? {
   guard isOpen else { return nil }
   return CommandPaletteItem(
     id: CommandPaletteItemID.pullRequestClose(repositoryID),
-    title: "Close PR",
+    title: "Close \(vocabulary.abbreviation)",
     subtitle: pullRequestTitle,
     kind: .closePullRequest(worktreeID),
     priorityTier: 1
@@ -716,6 +753,11 @@ private enum CommandPaletteItemID {
   static let globalNewWorktree = "global.new-worktree"
   static let globalRefreshWorktrees = "global.refresh-worktrees"
   static let globalViewArchivedWorktrees = "global.view-archived-worktrees"
+  static let toggleWindowMode = "worktree.toggle-window-mode"
+
+  static func layoutCommand(_ command: LayoutPaletteCommand) -> CommandPaletteItem.ID {
+    "worktree.layout.\(command.rawValue)"
+  }
 
   static var globalIDs: [CommandPaletteItem.ID] {
     [
@@ -853,7 +895,8 @@ private func delegateAction(for kind: CommandPaletteItem.Kind) -> CommandPalette
     return .removeWorktree(worktreeID, repositoryID)
   case .archiveWorktree(let worktreeID, let repositoryID):
     return .archiveWorktree(worktreeID, repositoryID)
-  case .renameBranch, .customizeRepositoryAppearance, .customizeWorktreeAppearance:
+  case .renameBranch, .customizeRepositoryAppearance, .customizeWorktreeAppearance, .toggleWindowMode,
+    .layoutCommand:
     return selectedEntryDelegateAction(for: kind)!
   case .viewArchivedWorktrees:
     return .viewArchivedWorktrees
@@ -892,8 +935,20 @@ private func selectedEntryDelegateAction(
     return .customizeRepositoryAppearance(repositoryID)
   case .customizeWorktreeAppearance(let worktreeID, let repositoryID):
     return .customizeWorktreeAppearance(worktreeID, repositoryID)
-  default:
+  case .toggleWindowMode:
+    return .toggleWindowMode
+  case .layoutCommand(let command):
+    return .layoutCommand(command)
+  case .checkForUpdates, .openRepository, .addRemoteRepository, .worktreeSelect, .openSettings,
+    .newWorktree, .removeWorktree, .archiveWorktree, .viewArchivedWorktrees, .refreshWorktrees,
+    .ghosttyCommand, .openPullRequest, .markPullRequestReady, .mergePullRequest,
+    .closePullRequest, .copyFailingJobURL, .copyCiFailureLogs, .rerunFailedJobs,
+    .openFailingCheckDetails, .runScript, .stopScript:
     return nil
+  #if DEBUG
+    case .debugTestToast:
+      return nil
+  #endif
   }
 }
 
@@ -930,7 +985,8 @@ private func pullRequestDelegateAction(
     return .rerunFailedJobs(worktreeID)
   case .openFailingCheckDetails(let worktreeID):
     return .openFailingCheckDetails(worktreeID)
-  case .worktreeSelect,
+  case .layoutCommand,
+    .worktreeSelect,
     .checkForUpdates,
     .openSettings,
     .newWorktree,
@@ -944,6 +1000,7 @@ private func pullRequestDelegateAction(
     .viewArchivedWorktrees,
     .refreshWorktrees,
     .ghosttyCommand,
+    .toggleWindowMode,
     .runScript,
     .stopScript:
     return nil
@@ -998,16 +1055,24 @@ private func scriptItems(
 }
 
 private func ghosttyCommandItems(_ commands: [GhosttyCommand]) -> [CommandPaletteItem] {
-  commands.map { command in
+  var items: [CommandPaletteItem] = []
+  items.reserveCapacity(commands.count)
+  for command in commands {
+    // Topology and search entries are owned by the app's own menus and chords;
+    // their surface-emitted actions are ignored, so drop the Ghostty entries.
+    guard !command.isTopologyCommand, !command.isSearchCommand else { continue }
     let subtitle = command.description.trimmingCharacters(in: .whitespacesAndNewlines)
-    return CommandPaletteItem(
-      id: CommandPaletteItemID.ghosttyCommand(command),
-      title: command.title,
-      subtitle: subtitle.isEmpty ? nil : subtitle,
-      kind: .ghosttyCommand(command.action),
-      priorityTier: CommandPaletteItem.defaultPriorityTier + 100
+    items.append(
+      CommandPaletteItem(
+        id: CommandPaletteItemID.ghosttyCommand(command),
+        title: command.title,
+        subtitle: subtitle.isEmpty ? nil : subtitle,
+        kind: .ghosttyCommand(command.action),
+        priorityTier: CommandPaletteItem.defaultPriorityTier + 100
+      )
     )
   }
+  return items
 }
 
 extension CommandPaletteFeature.State {

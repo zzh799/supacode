@@ -2,10 +2,43 @@ import Sharing
 import SupacodeSettingsShared
 import SwiftUI
 
+/// Leading toolbar back/forward pair that steps through worktree selection
+/// history, mirroring the ⌘⌃←/→ commands. Enablement and actions are injected
+/// so the view stays store-agnostic.
+struct WorktreeHistoryToolbarButtons: View {
+  let canGoBack: Bool
+  let canGoForward: Bool
+  let onBack: () -> Void
+  let onForward: () -> Void
+  @Shared(.settingsFile) private var settingsFile
+
+  var body: some View {
+    let overrides = settingsFile.global.shortcutOverrides
+    let backShortcut = WorktreeDetailView.resolveShortcutDisplay(
+      for: AppShortcuts.worktreeHistoryBack, overrides: overrides)
+    let forwardShortcut = WorktreeDetailView.resolveShortcutDisplay(
+      for: AppShortcuts.worktreeHistoryForward, overrides: overrides)
+    ControlGroup {
+      Button(action: onBack) {
+        Label("Back", systemImage: "chevron.backward")
+      }
+      .help("Back in Worktree History (\(backShortcut))")
+      .disabled(!canGoBack)
+
+      Button(action: onForward) {
+        Label("Forward", systemImage: "chevron.forward")
+      }
+      .help("Forward in Worktree History (\(forwardShortcut))")
+      .disabled(!canGoForward)
+    }
+    .controlGroupStyle(.navigation)
+  }
+}
+
 /// Trailing toolbar toggle for git / pull-request status, reusing the sidebar's
 /// icon + check-status badge. Always tappable: it toggles the git inspector pane.
 struct WorktreeGitStatusButton: View {
-  let pullRequest: GithubPullRequest?
+  let pullRequest: ForgePullRequest?
   let isSelected: Bool
   // Selection highlight color, derived from the terminal background luminance
   // so the lit state tracks the chrome instead of the system accent.
@@ -96,6 +129,39 @@ struct WorktreePullRequestIconBadge: View {
         }
       }
       .accessibilityHidden(true)
+  }
+}
+
+/// Trailing toolbar button that toggles the files inspector pane.
+struct WorktreeFilesToolbarButton: View {
+  let isSelected: Bool
+  // Selection highlight color, derived from the terminal background luminance
+  // so the lit state tracks the chrome instead of the system accent.
+  let tint: Color
+  // Concrete chrome foreground (white on dark, black on light) so the glyph
+  // doesn't change color when the toggle is selected.
+  let foreground: Color
+  let onActivate: () -> Void
+  @Shared(.settingsFile) private var settingsFile
+
+  var body: some View {
+    let shortcut = WorktreeDetailView.resolveShortcutDisplay(
+      for: AppShortcuts.toggleFilesInspector,
+      overrides: settingsFile.global.shortcutOverrides
+    )
+    Toggle(isOn: Binding(get: { isSelected }, set: { _ in onActivate() })) {
+      if isSelected {
+        Label("Files", systemImage: "list.bullet")
+          .foregroundStyle(foreground)
+      } else {
+        // No foreground so the resting glyph matches the other toolbar buttons
+        // exactly, including the fade when the window isn't key.
+        Label("Files", systemImage: "list.bullet")
+      }
+    }
+    .tint(tint)
+    .help("Toggle Files Inspector (\(shortcut))")
+    .accessibilityLabel("Files")
   }
 }
 

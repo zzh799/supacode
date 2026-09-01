@@ -17,6 +17,7 @@ struct SidebarListView: View {
   @Shared(.sidebarGroupPinnedRows) private var groupPinnedRows: Bool
   @Shared(.sidebarGroupActiveRows) private var groupActiveRows: Bool
   @Shared(.sidebarNestWorktreesByBranch) private var nestWorktreesByBranch: Bool
+  @Shared(.sidebarSectionSort) private var sectionSort: SidebarSectionSort
 
   var body: some View {
     let state = store.state
@@ -55,13 +56,15 @@ struct SidebarListView: View {
             terminalManager: terminalManager
           )
         }
-        .onMove { offsets, destination in
-          handleRepositoryMove(
-            offsets: offsets,
-            destination: destination,
-            structure: structure
-          )
-        }
+        .onMove(
+          perform: sectionSort.allowsReordering
+            ? { offsets, destination in
+              handleRepositoryMove(
+                offsets: offsets,
+                destination: destination,
+                structure: structure
+              )
+            } : nil)
       }
       .listStyle(.sidebar)
       .focused($isSidebarFocused)
@@ -74,6 +77,13 @@ struct SidebarListView: View {
       }
       .onChange(of: nestWorktreesByBranch, initial: false) { _, _ in
         store.send(.sidebarNestByBranchChanged)
+      }
+      .onChange(of: sectionSort, initial: true) { oldValue, newValue in
+        // `initial: true` so a change made while the sidebar column is
+        // collapsed still lands on the next appear (the View menu writes
+        // `@Shared` even when this view is unmounted). Animate a real toggle;
+        // the initial appear (oldValue == newValue) resyncs without motion.
+        store.send(.sidebarSectionSortChanged, animation: oldValue == newValue ? nil : .default)
       }
       .dropDestination(for: URL.self) { urls, _ in
         let fileURLs = urls.filter(\.isFileURL)
@@ -93,9 +103,9 @@ struct SidebarListView: View {
         guard let worktreeID = store.selectedWorktreeID,
           state.sidebarSelectedWorktreeIDs.count == 1,
           state.sidebarSelectedWorktreeIDs.contains(worktreeID),
-          let terminalState = terminalManager.stateIfExists(for: worktreeID)
+          let host = terminalManager.hostIfExists(for: worktreeID)
         else { return .ignored }
-        terminalState.focusAndInsertText(keyPress.characters)
+        host.focusAndInsertText(keyPress.characters)
         return .handled
       }
       .background(
@@ -104,9 +114,9 @@ struct SidebarListView: View {
           guard let worktreeID = store.selectedWorktreeID,
             state.sidebarSelectedWorktreeIDs.count == 1,
             state.sidebarSelectedWorktreeIDs.contains(worktreeID),
-            let terminalState = terminalManager.stateIfExists(for: worktreeID)
+            let host = terminalManager.hostIfExists(for: worktreeID)
           else { return false }
-          terminalState.focusSelectedTab()
+          host.focusSelectedTab()
           return true
         }
       )
@@ -339,7 +349,7 @@ private struct SidebarHoistSummaryRow: View {
         }
         Spacer(minLength: 0)
       }
-      .font(.caption)
+      .appFont(.caption)
       .foregroundStyle(.secondary)
       .lineLimit(1)
       .contentShape(.interaction, .rect)
@@ -544,12 +554,12 @@ private struct SidebarPlaceholderView: View {
           Label {
             VStack(alignment: .leading, spacing: 2) {
               Text("placeholder-branch")
-                .font(.body)
+                .appFont(.body)
                 .lineLimit(1)
                 .redacted(reason: .placeholder)
                 .shimmer(isActive: true)
               Text("placeholder")
-                .font(.footnote)
+                .appFont(.footnote)
                 .lineLimit(1)
                 .redacted(reason: .placeholder)
                 .shimmer(isActive: true)

@@ -62,7 +62,7 @@ final class GhosttySurfaceBridge {
   // Fired on OSC 11 background changes only; used to re-tint window chrome
   // when the focused surface's background changes.
   var onColorChanged: (() -> Void)?
-  // Used by blocking script completion detection in WorktreeTerminalState.
+  // Used by blocking script completion detection in the content host.
   // Both callbacks are set on every surface but guarded by the
   // blockingScripts dict in the handlers.
   var onCommandFinished: ((Int?) -> Void)?
@@ -276,7 +276,10 @@ final class GhosttySurfaceBridge {
       return true
 
     case GHOSTTY_ACTION_PWD:
-      state.pwd = string(from: action.action.pwd.pwd)
+      // Shells re-emit OSC 7 per prompt; skip the no-op write and a11y posts.
+      let pwd = string(from: action.action.pwd.pwd)
+      guard pwd != state.pwd else { return true }
+      state.pwd = pwd
       if let surfaceView {
         NSAccessibility.post(element: surfaceView, notification: .valueChanged)
         // VoiceOver does not reliably re-read the label on `.valueChanged` alone.

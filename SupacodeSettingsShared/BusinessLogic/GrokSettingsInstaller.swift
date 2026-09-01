@@ -6,14 +6,16 @@ import Foundation
 nonisolated struct GrokSettingsInstaller {
   static let hookFileName = "supacode.json"
 
-  let homeDirectoryURL: URL
+  let configDirectoryURL: URL
   let fileManager: FileManager
 
   init(
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+    configDirectoryURL: URL? = nil,
     fileManager: FileManager = .default
   ) {
-    self.homeDirectoryURL = homeDirectoryURL
+    self.configDirectoryURL =
+      configDirectoryURL ?? homeDirectoryURL.appending(path: ".grok", directoryHint: .isDirectory)
     self.fileManager = fileManager
   }
 
@@ -23,7 +25,7 @@ nonisolated struct GrokSettingsInstaller {
   /// After the shared command-set check, also requires every managed hook to
   /// carry the canonical Grok env passthrough map, inspected on the same
   /// parsed snapshot (no second disk read).
-  func installState() -> ComponentInstallState {
+  func installState() throws -> ComponentInstallState {
     let groups: [String: [JSONValue]]
     do {
       groups = try GrokHookSettings.hooksByEvent()
@@ -31,7 +33,7 @@ nonisolated struct GrokSettingsInstaller {
       Self.reportInvalidHookConfiguration(error)
       return .notInstalled
     }
-    return fileInstaller.installState(
+    return try fileInstaller.installState(
       settingsURL: settingsURL,
       hookGroupsByEvent: groups,
       additionalOutdatedIfInstalled: GrokHookSettings.managedHooksLackEnvPassthrough(in:)
@@ -59,7 +61,9 @@ nonisolated struct GrokSettingsInstaller {
   }
 
   private var settingsURL: URL {
-    Self.settingsURL(homeDirectoryURL: homeDirectoryURL)
+    configDirectoryURL
+      .appending(path: "hooks", directoryHint: .isDirectory)
+      .appending(path: Self.hookFileName, directoryHint: .notDirectory)
   }
 
   static func settingsURL(homeDirectoryURL: URL) -> URL {

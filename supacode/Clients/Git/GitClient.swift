@@ -20,6 +20,12 @@ enum GitOperation: String {
   case symbolicHeadRef = "symbolic_head_ref"
   case ignoredFileCount = "ignored_file_count"
   case untrackedFileCount = "untracked_file_count"
+  case supaignoreLookup = "supaignore_lookup"
+  case worktreeCopyPlan = "worktree_copy_plan"
+  case fileStatus = "file_status"
+  case stageFile = "stage_file"
+  case unstageFile = "unstage_file"
+  case discardFile = "discard_file"
   case branchDelete = "branch_delete"
   case branchRename = "branch_rename"
   case lineChanges = "line_changes"
@@ -633,6 +639,109 @@ struct GitClient {
     return parseFileListCount(output)
   }
 
+  /// The `supaignore` blob committed at `baseRef`, read byte-preservingly from the
+  /// object store so a pattern's edge whitespace survives. `nil` when the ref has
+  /// no such blob (a directory named `supaignore` counts as none); throws on a
+  /// genuine lookup failure so the caller fails safe.
+  nonisolated func committedSupaignore(for repoRoot: URL, baseRef: String) async throws -> String? {
+    let path = repoRoot.path(percentEncoded: false)
+    let reference = baseRef.isEmpty ? "HEAD" : baseRef
+    let objectSpec = "\(reference):\(SupaignoreMerge.fileName)"
+    do {
+      // Only a committed blob is a supaignore file. A committed directory named
+      // `supaignore` makes `git show` emit a tree listing we would misread as
+      // patterns, so gate on the object type first.
+      let objectType = try await runGit(
+        operation: .supaignoreLookup,
+        arguments: ["-C", path, "cat-file", "-t", objectSpec],
+        localePinned: true
+      ).trimmingCharacters(in: .whitespacesAndNewlines)
+      guard objectType == "blob" else { return nil }
+      let data = try await runGitData(
+        operation: .supaignoreLookup,
+        arguments: ["-C", path, "show", objectSpec],
+        localePinned: true
+      )
+      // Decode without trimming so a pattern's leading / trailing whitespace is
+      // kept; a non-UTF-8 blob can't be read as patterns, so fail safe.
+      guard let output = String(bytes: data, encoding: .utf8) else {
+        throw GitClientError.commandFailed(
+          command: "git show \(objectSpec)", message: "supaignore is not valid UTF-8")
+      }
+      return output.isEmpty ? nil : output
+    } catch {
+      // Classify on git's stderr alone, not the full description, so a repo path
+      // that happens to contain the phrase can't mask a real error.
+      let stderr: String
+      if let gitError = error as? GitClientError, case .commandFailed(_, let message) = gitError {
+        stderr = message
+      } else {
+        stderr = "\(error)"
+      }
+      // Match git's full absent-file phrasing; any other failure throws (fails safe).
+      guard stderr.contains("does not exist in") || stderr.contains("exists on disk, but not in")
+      else {
+        gitLogger.error("supaignore lookup failed at \(reference) in \(path): \(stderr)")
+        throw error
+      }
+      return nil
+    }
+  }
+
+  /// The ignored / untracked files that survive `supaignore` filtering.
+  /// `supaignoreExclusions` omits `--exclude-standard`, so only the merged
+  /// `supaignore` patterns apply, never the repo's own `.gitignore`.
+  nonisolated func worktreeCopyPlan(
+    for repoRoot: URL,
+    copyIgnored: Bool,
+    copyUntracked: Bool,
+    excludePatterns: String
+  ) async throws -> WorktreeCopyPlan {
+    let path = repoRoot.path(percentEncoded: false)
+    let ignoredCandidates =
+      copyIgnored
+      ? try await nulSeparatedPaths(
+        arguments: ["-C", path, "ls-files", "-z", "--others", "-i", "--exclude-standard"])
+      : []
+    let untrackedCandidates =
+      copyUntracked
+      ? try await nulSeparatedPaths(
+        arguments: ["-C", path, "ls-files", "-z", "--others", "--exclude-standard"])
+      : []
+    let excluded = try await supaignoreExclusions(repoPath: path, patterns: excludePatterns)
+    return WorktreeCopyPlan.survivors(
+      ignoredCandidates: ignoredCandidates,
+      untrackedCandidates: untrackedCandidates,
+      excluded: Set(excluded)
+    )
+  }
+
+  /// The non-tracked files matching `patterns` under exact gitignore semantics,
+  /// isolated from the repo's own excludes by omitting `--exclude-standard`.
+  nonisolated private func supaignoreExclusions(
+    repoPath: String,
+    patterns: String
+  ) async throws -> [String] {
+    let tempURL = FileManager.default.temporaryDirectory
+      .appending(path: "supaignore-\(UUID().uuidString)")
+    try patterns.write(to: tempURL, atomically: true, encoding: .utf8)
+    defer { try? FileManager.default.removeItem(at: tempURL) }
+    return try await nulSeparatedPaths(
+      arguments: [
+        "-C", repoPath, "ls-files", "-z", "--others", "-i",
+        "--exclude-from=\(tempURL.path(percentEncoded: false))",
+      ]
+    )
+  }
+
+  // `ShellClient` decodes stdout as UTF-8 and trims its boundary whitespace, so
+  // a filename with leading whitespace or invalid UTF-8 bytes can be mutated or
+  // dropped here (rare; matches `fileStatus`'s `-z` handling).
+  nonisolated private func nulSeparatedPaths(arguments: [String]) async throws -> [String] {
+    let output = try await runGit(operation: .worktreeCopyPlan, arguments: arguments)
+    return output.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+  }
+
   nonisolated func createWorktree(
     named name: String,
     in repoRoot: URL,
@@ -1053,6 +1162,65 @@ struct GitClient {
     }
   }
 
+  /// One-shot uncommitted status for the files inspector. `nil` on a probe
+  /// failure so the caller keeps its last-good snapshot; an empty snapshot is
+  /// genuinely clean. `--no-optional-locks` keeps the poll lock-free, and
+  /// `--ignored=matching` reports a wholly-ignored directory as one entry.
+  nonisolated func fileStatus(at worktreeURL: URL) async -> GitStatusSnapshot? {
+    let path = worktreeURL.path(percentEncoded: false)
+    guard
+      let output = try? await runGit(
+        operation: .fileStatus,
+        arguments: [
+          "-C", path, "--no-optional-locks", "status", "--porcelain=v2", "-z",
+          "--untracked-files=all", "--ignored=matching", "--no-renames",
+        ],
+        localePinned: true
+      )
+    else {
+      return nil
+    }
+    return GitStatusSnapshot.parse(porcelainV2: output)
+  }
+
+  // Mutations pin the C locale so a lock-contention failure classifies by its
+  // English stderr regardless of the user's system language, and pass
+  // `--literal-pathspecs` so a filename with pathspec magic (`*`, `?`, `[`)
+  // never matches beyond the single file the confirmation named.
+  nonisolated func stageFile(_ relativePath: String, in worktreeURL: URL) async throws {
+    let path = worktreeURL.path(percentEncoded: false)
+    // `git add` stages deletions too, so it covers every unstaged change.
+    _ = try await runGit(
+      operation: .stageFile,
+      arguments: ["--literal-pathspecs", "-C", path, "add", "--", relativePath],
+      localePinned: true
+    )
+  }
+
+  nonisolated func unstageFile(_ relativePath: String, in worktreeURL: URL) async throws {
+    let path = worktreeURL.path(percentEncoded: false)
+    // No explicit HEAD: on an unborn branch `git reset` falls back to the empty
+    // tree, where naming HEAD would fail to resolve.
+    _ = try await runGit(
+      operation: .unstageFile,
+      arguments: ["--literal-pathspecs", "-C", path, "reset", "-q", "--", relativePath],
+      localePinned: true
+    )
+  }
+
+  /// Reverts a tracked path's index and worktree to HEAD. The discarded worktree
+  /// content is not recoverable from the reflog, so callers must confirm first.
+  nonisolated func discardTrackedFile(_ relativePath: String, in worktreeURL: URL) async throws {
+    let path = worktreeURL.path(percentEncoded: false)
+    _ = try await runGit(
+      operation: .discardFile,
+      arguments: [
+        "--literal-pathspecs", "-C", path, "restore", "--source=HEAD", "--staged", "--worktree", "--", relativePath,
+      ],
+      localePinned: true
+    )
+  }
+
   nonisolated private func isWorktreeIndexLocked(_ worktreeURL: URL) async -> Bool {
     let headURL = await MainActor.run {
       GitWorktreeHeadResolver.headURL(
@@ -1066,6 +1234,45 @@ struct GitClient {
     let gitDirectory = headURL.deletingLastPathComponent()
     let lockURL = gitDirectory.appending(path: "index.lock")
     return FileManager.default.fileExists(atPath: lockURL.path(percentEncoded: false))
+  }
+
+  /// First parseable remote (origin preferred), forge-blind.
+  nonisolated func remote(for repositoryRoot: URL) async -> GitRemote? {
+    let path = repositoryRoot.path(percentEncoded: false)
+    guard
+      let remotesOutput = try? await runGit(
+        operation: .remoteInfo,
+        arguments: ["-C", path, "remote"]
+      )
+    else {
+      return nil
+    }
+    let remotes =
+      remotesOutput
+      .split(whereSeparator: \.isNewline)
+      .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+    let orderedRemotes: [String]
+    if remotes.contains("origin") {
+      orderedRemotes = ["origin"] + remotes.filter { $0 != "origin" }
+    } else {
+      orderedRemotes = remotes
+    }
+    for remote in orderedRemotes {
+      guard
+        // `ls-remote --get-url` applies url.<base>.insteadOf rewrites; `remote get-url` does not.
+        let remoteURL = try? await runGit(
+          operation: .remoteInfo,
+          arguments: ["-C", path, "ls-remote", "--get-url", remote]
+        )
+      else {
+        continue
+      }
+      if let parsed = GitRemote.parse(remoteURL) {
+        return parsed
+      }
+    }
+    return nil
   }
 
   nonisolated func remoteInfo(for repositoryRoot: URL) async -> GithubRemoteInfo? {
@@ -1091,9 +1298,10 @@ struct GitClient {
     }
     for remote in orderedRemotes {
       guard
+        // `ls-remote --get-url` applies url.<base>.insteadOf rewrites; `remote get-url` does not.
         let remoteURL = try? await runGit(
           operation: .remoteInfo,
-          arguments: ["-C", path, "remote", "get-url", remote]
+          arguments: ["-C", path, "ls-remote", "--get-url", remote]
         )
       else {
         continue
@@ -1229,6 +1437,23 @@ struct GitClient {
     }
   }
 
+  // Byte-preserving variant of `runGit`: returns raw stdout so significant edge
+  // whitespace survives `ShellClient`'s normalization. Errors classify the same.
+  nonisolated private func runGitData(
+    operation: GitOperation,
+    arguments: [String],
+    localePinned: Bool = false
+  ) async throws -> Data {
+    let env = URL(fileURLWithPath: "/usr/bin/env")
+    let invocation = (localePinned ? ["LC_ALL=C", "LANG=C"] : []) + ["git"] + arguments
+    let command = ([env.path(percentEncoded: false)] + invocation).joined(separator: " ")
+    do {
+      return try await shell.runData(env, invocation, nil)
+    } catch {
+      throw wrapShellError(error, operation: operation, command: command)
+    }
+  }
+
   nonisolated private func runWtList(repoRoot: URL) async throws -> String {
     let wtURL = try wtScriptURL()
     let arguments = ["ls", "--json"]
@@ -1266,20 +1491,6 @@ struct GitClient {
       } catch {
         throw wrapShellError(error, operation: operation, command: command)
       }
-    }
-  }
-
-  nonisolated private func runLoginShellProcess(
-    operation: GitOperation,
-    executableURL: URL,
-    arguments: [String],
-    currentDirectoryURL: URL?
-  ) async throws -> String {
-    let command = ([executableURL.path(percentEncoded: false)] + arguments).joined(separator: " ")
-    do {
-      return try await shell.runLogin(executableURL, arguments, currentDirectoryURL).stdout
-    } catch {
-      throw wrapShellError(error, operation: operation, command: command)
     }
   }
 
@@ -1421,47 +1632,10 @@ struct GitClient {
   }
 
   nonisolated static func parseGithubRemoteInfo(_ remoteURL: String) -> GithubRemoteInfo? {
-    let trimmed = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
+    guard let remote = GitRemote.parse(remoteURL) else {
       return nil
     }
-    if trimmed.hasPrefix("git@") {
-      let parts = trimmed.split(separator: "@", maxSplits: 1, omittingEmptySubsequences: true)
-      guard parts.count == 2 else {
-        return nil
-      }
-      let hostAndPath = parts[1]
-      let hostParts = hostAndPath.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true)
-      guard hostParts.count == 2 else {
-        return nil
-      }
-      return parseGithubRemoteInfo(host: String(hostParts[0]), path: String(hostParts[1]))
-    }
-    guard let url = URL(string: trimmed), let host = url.host else {
-      return nil
-    }
-    let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    return parseGithubRemoteInfo(host: host, path: path)
-  }
-
-  nonisolated private static func parseGithubRemoteInfo(host: String, path: String) -> GithubRemoteInfo? {
-    let normalizedHost = host.lowercased()
-    guard normalizedHost.contains("github") else {
-      return nil
-    }
-    let components = path.split(separator: "/", omittingEmptySubsequences: true)
-    guard components.count >= 2 else {
-      return nil
-    }
-    let owner = String(components[0])
-    var repo = String(components[1])
-    if repo.hasSuffix(".git") {
-      repo = String(repo.dropLast(4))
-    }
-    guard !owner.isEmpty, !repo.isEmpty else {
-      return nil
-    }
-    return GithubRemoteInfo(host: host, owner: owner, repo: repo)
+    return GithubRemoteInfo(gitRemote: remote)
   }
 
 }

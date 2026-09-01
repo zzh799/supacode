@@ -4,6 +4,9 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
   public var setupScript: String
   public var archiveScript: String
   public var deleteScript: String
+  /// Runs when a File Explorer file is opened, with its path in `SUPACODE_FILE_PATH`. Empty
+  /// inherits the global script, then the system default app. A hook, never in the script menu.
+  public var openFileScript: String
   /// Legacy field kept for backward-compatible JSON serialization.
   /// New code should use `scripts` instead. On encode, this is
   /// derived from the first `.run`-kind script's command.
@@ -15,11 +18,17 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
   public var copyIgnoredOnWorktreeCreate: Bool?
   public var copyUntrackedOnWorktreeCreate: Bool?
   public var pullRequestMergeStrategy: PullRequestMergeStrategy?
+  /// Action when a worktree's pull request is merged. `nil` inherits the global setting.
+  public var mergedWorktreeAction: MergedWorktreeAction?
+  /// Forge for this repository. `nil` resolves automatically from the remote;
+  /// `"none"` disables forge integration for the repository.
+  public var forgeID: String?
 
   private enum CodingKeys: String, CodingKey {
     case setupScript
     case archiveScript
     case deleteScript
+    case openFileScript
     case runScript
     case scripts
     case openActionID
@@ -28,12 +37,15 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     case copyIgnoredOnWorktreeCreate
     case copyUntrackedOnWorktreeCreate
     case pullRequestMergeStrategy
+    case mergedWorktreeAction
+    case forgeID
   }
 
   public static let `default` = RepositorySettings(
     setupScript: "",
     archiveScript: "",
     deleteScript: "",
+    openFileScript: "",
     runScript: "",
     scripts: [],
     openActionID: OpenWorktreeAction.automaticSettingsID,
@@ -42,12 +54,15 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     copyIgnoredOnWorktreeCreate: nil,
     copyUntrackedOnWorktreeCreate: nil,
     pullRequestMergeStrategy: nil,
+    mergedWorktreeAction: nil,
+    forgeID: nil,
   )
 
   public init(
     setupScript: String,
     archiveScript: String,
     deleteScript: String,
+    openFileScript: String = "",
     runScript: String,
     scripts: [ScriptDefinition] = [],
     openActionID: String,
@@ -55,11 +70,14 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     worktreeBaseDirectoryPath: String? = nil,
     copyIgnoredOnWorktreeCreate: Bool? = nil,
     copyUntrackedOnWorktreeCreate: Bool? = nil,
-    pullRequestMergeStrategy: PullRequestMergeStrategy? = nil
+    pullRequestMergeStrategy: PullRequestMergeStrategy? = nil,
+    mergedWorktreeAction: MergedWorktreeAction? = nil,
+    forgeID: String? = nil
   ) {
     self.setupScript = setupScript
     self.archiveScript = archiveScript
     self.deleteScript = deleteScript
+    self.openFileScript = openFileScript
     self.runScript = runScript
     self.scripts = scripts
     self.openActionID = openActionID
@@ -68,6 +86,8 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     self.copyIgnoredOnWorktreeCreate = copyIgnoredOnWorktreeCreate
     self.copyUntrackedOnWorktreeCreate = copyUntrackedOnWorktreeCreate
     self.pullRequestMergeStrategy = pullRequestMergeStrategy
+    self.mergedWorktreeAction = mergedWorktreeAction
+    self.forgeID = forgeID
   }
 
   public init(from decoder: Decoder) throws {
@@ -81,6 +101,9 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     deleteScript =
       try container.decodeIfPresent(String.self, forKey: .deleteScript)
       ?? Self.default.deleteScript
+    openFileScript =
+      try container.decodeIfPresent(String.self, forKey: .openFileScript)
+      ?? Self.default.openFileScript
     runScript =
       try container.decodeIfPresent(String.self, forKey: .runScript)
       ?? Self.default.runScript
@@ -109,6 +132,12 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     pullRequestMergeStrategy =
       try container.decodeIfPresent(PullRequestMergeStrategy.self, forKey: .pullRequestMergeStrategy)
       ?? Self.default.pullRequestMergeStrategy
+    mergedWorktreeAction =
+      try container.decodeIfPresent(MergedWorktreeAction.self, forKey: .mergedWorktreeAction)
+      ?? Self.default.mergedWorktreeAction
+    forgeID =
+      try container.decodeIfPresent(String.self, forKey: .forgeID)
+      ?? Self.default.forgeID
   }
 
   public func encode(to encoder: Encoder) throws {
@@ -116,6 +145,7 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     try container.encode(setupScript, forKey: .setupScript)
     try container.encode(archiveScript, forKey: .archiveScript)
     try container.encode(deleteScript, forKey: .deleteScript)
+    try container.encode(openFileScript, forKey: .openFileScript)
     // Derive `runScript` from the first `.run`-kind script's command
     // so older clients can still read the value.
     // Fall back to empty string (not the legacy `runScript` property)
@@ -130,5 +160,7 @@ public nonisolated struct RepositorySettings: Codable, Equatable, Sendable {
     try container.encodeIfPresent(copyIgnoredOnWorktreeCreate, forKey: .copyIgnoredOnWorktreeCreate)
     try container.encodeIfPresent(copyUntrackedOnWorktreeCreate, forKey: .copyUntrackedOnWorktreeCreate)
     try container.encodeIfPresent(pullRequestMergeStrategy, forKey: .pullRequestMergeStrategy)
+    try container.encodeIfPresent(mergedWorktreeAction, forKey: .mergedWorktreeAction)
+    try container.encodeIfPresent(forgeID, forKey: .forgeID)
   }
 }

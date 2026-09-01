@@ -32,10 +32,6 @@ struct WorktreeDetailView: View {
     let selectedRow = repositories.selectedWorktreeSlice
     let selectedWorktree = repositories.worktree(for: repositories.selectedWorktreeID)
     let selectedWorktreeSummaries = selectedWorktreeSummaries(from: repositories)
-    let showsMultiSelectionSummary = shouldShowMultiSelectionSummary(
-      repositories: repositories,
-      selectedWorktreeSummaries: selectedWorktreeSummaries
-    )
     let loadingInfo = loadingInfo(
       for: selectedRow,
       selectedWorktreeID: repositories.selectedWorktreeID,
@@ -47,11 +43,10 @@ struct WorktreeDetailView: View {
       selectedWorktree: selectedWorktree,
       selectedWorktreeSummaries: selectedWorktreeSummaries
     )
-    let hasActiveWorktree =
-      selectedWorktree != nil
-      && loadingInfo == nil
-      && !showsMultiSelectionSummary
-      && selectedWorktree?.isMissing != true
+    let hasActiveWorktree = hasActiveWorktree(
+      repositories: repositories, loadingInfo: loadingInfo,
+      selectedWorktree: selectedWorktree, selectedWorktreeSummaries: selectedWorktreeSummaries
+    )
     // `toolbarNotificationGroupsCache` is observed inside `ToolbarNotificationsButtonHost`
     // instead; reading it here would re-render the body on every notification.
     let repositoriesStore = store.scope(state: \.repositories, action: \.repositories)
@@ -66,10 +61,21 @@ struct WorktreeDetailView: View {
       selectedRow: selectedRow,
       repositories: repositories
     )
+    let inspectorCapabilities = Self.inspectorCapabilities(
+      repositories: repositories, selectedWorktree: selectedWorktree)
     // Read the manager's stored color here (tracked body evaluation, not the
     // deferred toolbar closure) so the toolbar scheme invalidates on change.
     let toolbarScheme: ColorScheme =
       terminalManager.focusedSurfaceBackground.isLightColor ? .light : .dark
+    // Reveal in Finder is local-only; Open can target a remote worktree when the
+    // resolved editor can express the host. `resolvedSelection` (nil when it
+    // can't) drives the focused-action enablement, the menu label, and the
+    // files inspector's default Open.
+    let resolvedSelection = Self.resolvedOpenSelection(
+      hasActiveWorktree: hasActiveWorktree,
+      selectedWorktree: selectedWorktree,
+      state: state
+    )
     let content = detailContent(
       repositories: repositories,
       loadingInfo: loadingInfo,
@@ -77,6 +83,8 @@ struct WorktreeDetailView: View {
       selectedSlice: selectedRow,
       selectedWorktreeSummaries: selectedWorktreeSummaries
     )
+    // Applied before `.inspector` so the toast stays within the content, not over the inspector.
+    .statusToastOverlay(store: repositoriesStore)
     .toolbar(removing: .title)
     .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
     .toolbar {
@@ -109,29 +117,25 @@ struct WorktreeDetailView: View {
         isCheckingPullRequest: isCheckingPullRequest,
         pullRequest: inspectorPullRequest,
         repositoriesStore: repositoriesStore,
+        capabilities: inspectorCapabilities,
         terminalManager: terminalManager,
+        fileOpenActions: state.installedOpenActions.filter(\.canOpenFiles),
+        resolvedOpenAction: resolvedSelection,
         onSelectNotification: selectToolbarNotification,
-        onSelectSurface: selectToolbarSurface,
-        onPullRequestAction: { sendPullRequestAction($0, worktree: selectedWorktree) }
+        onPullRequestAction: { sendPullRequestAction($0, worktree: selectedWorktree) },
+        onOpenFile: { store.send(.openFile($0, with: $1)) },
+        onActivateFile: { store.send(.openFileFromExplorer($0)) }
       )
       .inspectorColumnWidth(min: 280, ideal: 320, max: 480)
       // Match the inspector's accent to the terminal background; the appearance
       // is forced inside `WorktreeStatusInspectorContainer`.
       .tint(terminalManager.chromeOverlayTint())
     }
-    // Reveal in Finder is local-only; Open can target a remote worktree when the
-    // resolved editor can express the host. `resolvedSelection` (nil when it
-    // can't) drives both the focused-action enablement and the menu label.
-    let resolvedSelection = Self.resolvedOpenSelection(
-      hasActiveWorktree: hasActiveWorktree,
-      selectedWorktree: selectedWorktree,
-      state: state
-    )
     return applyFocusedActions(
       content: content,
+      state: state,
       hasActiveWorktree: hasActiveWorktree,
       canRevealLocally: hasActiveWorktree && selectedWorktree?.host == nil,
-      hasRunningRunScript: state.hasRunningRunScript,
       resolvedSelection: resolvedSelection
     )
   }
@@ -140,13 +144,25 @@ struct WorktreeDetailView: View {
   private static func inspectorPullRequest(
     selectedWorktree: Worktree?,
     selectedRow: SelectedWorktreeSlice?
-  ) -> GithubPullRequest? {
+  ) -> ForgePullRequest? {
     selectedWorktree.flatMap { worktree in
       if case .git(let pullRequest) = toolbarKind(for: worktree, selectedRow: selectedRow) {
         return pullRequest
       }
       return nil
     }
+  }
+
+  /// Capabilities of the selected repo's resolved forge; GitHub until resolved.
+  private static func inspectorCapabilities(
+    repositories: RepositoriesFeature.State,
+    selectedWorktree: Worktree?
+  ) -> ForgeCapabilities {
+    guard
+      let selectedWorktree,
+      let repositoryID = repositories.repositoryID(containing: selectedWorktree.id)
+    else { return .github }
+    return repositories.forgeCapabilities(for: repositoryID)
   }
 
   /// Whether a pull-request refresh is in flight for the selected worktree's repo.
@@ -235,6 +251,19 @@ struct WorktreeDetailView: View {
     return !repositories.isInitialLoadComplete
   }
 
+  private func hasActiveWorktree(
+    repositories: RepositoriesFeature.State,
+    loadingInfo: WorktreeLoadingInfo?,
+    selectedWorktree: Worktree?,
+    selectedWorktreeSummaries: [MultiSelectedWorktreeSummary]
+  ) -> Bool {
+    selectedWorktree != nil
+      && loadingInfo == nil
+      && !shouldShowMultiSelectionSummary(
+        repositories: repositories, selectedWorktreeSummaries: selectedWorktreeSummaries)
+      && selectedWorktree?.isMissing != true
+  }
+
   @ViewBuilder
   private func detailContent(
     repositories: RepositoriesFeature.State,
@@ -273,24 +302,26 @@ struct WorktreeDetailView: View {
           store.send(.repositories(.requestDeleteSidebarItems([target])))
         }
       } else if let selectedWorktree {
-        let shouldRunSetupScript = selectedSlice?.lifecycle == .pending
         let shouldFocusTerminal = repositories.shouldFocusTerminal(for: selectedWorktree.id)
-        WorktreeTerminalTabsView(
+        let pendingTerminalFocus: Worktree.ID? = shouldFocusTerminal ? selectedWorktree.id : nil
+        // No `.id` on purpose: keeping the view stable across a worktree switch
+        // lets the live surface reparent its cached wrapper instead of tearing
+        // the hosting chain down and rebuilding it at zero size.
+        WorktreeLayoutView(
           worktree: selectedWorktree,
           manager: terminalManager,
           terminalsStore: store.scope(state: \.terminals, action: \.terminals),
-          shouldRunSetupScript: shouldRunSetupScript,
-          isLifecycleBusy: selectedSlice?.lifecycle.isBusy ?? false,
+          runtime: ContentRuntime.liveValue,
           forceAutoFocus: shouldFocusTerminal,
-          createTab: { store.send(.newTerminal) }
+          isLifecycleBusy: selectedSlice?.lifecycle.isBusy ?? false
         )
-        .id(selectedWorktree.id)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea(.container, edges: .bottom)
-        .onAppear {
-          if shouldFocusTerminal {
-            store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
-          }
+        // The subtree is stable across a switch, so `onAppear` fires only once;
+        // drive the consume from the focus request itself.
+        .onChange(of: pendingTerminalFocus, initial: true) { _, target in
+          guard let target else { return }
+          store.send(.repositories(.consumeTerminalFocus(target)))
         }
       } else if !repositories.isInitialLoadComplete {
         DetailPlaceholderView()
@@ -300,14 +331,30 @@ struct WorktreeDetailView: View {
     }
   }
 
+  /// Whether the selected worktree has a focused tab to act on, so Close Tab /
+  /// Close Surface don't hold Cmd-W on an emptied layout and steal it from Close
+  /// Window.
+  static func hasFocusedTab(in state: AppFeature.State, worktreeID: Worktree.ID?) -> Bool {
+    guard let worktreeID,
+      let layout = state.terminals.layouts[id: worktreeID]?.layout,
+      let focusedPaneID = layout.focusedPaneID
+    else { return false }
+    return layout.panes[id: focusedPaneID]?.selectedTab != nil
+  }
+
   private func applyFocusedActions<Content: View>(
     content: Content,
+    state: AppFeature.State,
     hasActiveWorktree: Bool,
     canRevealLocally: Bool,
-    hasRunningRunScript: Bool,
     resolvedSelection: OpenWorktreeAction?
   ) -> some View {
-    content
+    // Reading the layout re-runs this body on its churn, but the FocusedAction
+    // (isEnabled, token) dedup keeps AppKit from rebuilding the menu.
+    let hasFocusedTab = Self.hasFocusedTab(in: state, worktreeID: state.repositories.selectedWorktreeID)
+    let hasRunningRunScript = state.hasRunningRunScript
+    return
+      content
       // Open is enabled only when the resolved editor can open the selection
       // (`resolvedSelection != nil`), which already folds in remote capability.
       .focusedSceneAction(\.openSelectedWorktreeAction, enabled: resolvedSelection != nil) {
@@ -323,13 +370,29 @@ struct WorktreeDetailView: View {
       .focusedSceneAction(\.newTerminalAction, enabled: hasActiveWorktree) {
         store.send(.newTerminal)
       }
+      // Lock and validity are enforced by the terminal model, so this only gates on an active worktree.
+      .focusedSceneAction(\.renameTabAction, enabled: hasActiveWorktree) {
+        store.send(.renameSelectedTerminalTab)
+      }
       .focusedAction(\.splitTerminalAction, enabled: hasActiveWorktree) { direction in
         store.send(.splitTerminal(direction))
       }
-      .focusedAction(\.closeTabAction, enabled: hasActiveWorktree) {
+      .focusedSceneAction(\.toggleWindowModeAction, enabled: hasActiveWorktree) {
+        store.send(.toggleWindowModeForFocusedPane)
+      }
+      .focusedAction(\.toggleSplitZoomAction, enabled: hasActiveWorktree) {
+        store.send(.toggleSplitZoom)
+      }
+      .focusedAction(\.equalizeSplitsAction, enabled: hasActiveWorktree) {
+        store.send(.equalizeSplits)
+      }
+      .focusedAction(\.focusSplitAction, enabled: hasActiveWorktree) { direction in
+        store.send(.focusSplit(direction))
+      }
+      .focusedAction(\.closeTabAction, enabled: hasActiveWorktree && hasFocusedTab) {
         store.send(.closeTab)
       }
-      .focusedAction(\.closeSurfaceAction, enabled: hasActiveWorktree) {
+      .focusedAction(\.closeSurfaceAction, enabled: hasActiveWorktree && hasFocusedTab) {
         store.send(.closeSurface)
       }
       .focusedSceneAction(\.startSearchAction, enabled: hasActiveWorktree) {
@@ -344,9 +407,6 @@ struct WorktreeDetailView: View {
       .focusedSceneAction(\.navigateSearchPreviousAction, enabled: hasActiveWorktree) {
         store.send(.navigateSearchPrevious)
       }
-      .focusedSceneAction(\.endSearchAction, enabled: hasActiveWorktree) {
-        store.send(.endSearch)
-      }
       .focusedSceneAction(\.runScriptAction, enabled: hasActiveWorktree) {
         store.send(.runScript)
       }
@@ -355,19 +415,17 @@ struct WorktreeDetailView: View {
       }
   }
 
+  /// Selects the worktree and focuses the notification's surface, which marks it read.
   private func selectToolbarNotification(
     _ worktreeID: Worktree.ID,
     _ notification: WorktreeTerminalNotification
   ) {
-    selectToolbarSurface(worktreeID, notification.surfaceID)
-  }
-
-  /// Focuses a surface directly, used by the inspector's pruned-unread row where
-  /// no notification object survives to carry the surface ID.
-  private func selectToolbarSurface(_ worktreeID: Worktree.ID, _ surfaceID: UUID) {
     store.send(.repositories(.selectWorktree(worktreeID)))
-    if let terminalState = terminalManager.stateIfExists(for: worktreeID) {
-      _ = terminalState.focusSurface(id: surfaceID)
+    if let host = terminalManager.hostIfExists(for: worktreeID),
+      !host.focusSurface(id: notification.surfaceID)
+    {
+      SupaLogger("Terminal").warning(
+        "Failed to focus surface \(notification.surfaceID) for worktree \(worktreeID).")
     }
   }
 
@@ -377,6 +435,24 @@ struct WorktreeDetailView: View {
   ) {
     guard let worktreeID = worktree?.id else { return }
     store.send(.repositories(.pullRequestAction(worktreeID, action)))
+  }
+
+  /// Toolbar back/forward host. Reads the worktree-history enablement in its own
+  /// View body so the chevrons invalidate only this leaf when history changes.
+  /// `repositoriesStore` is optional so previews can mount it without a `Store`.
+  fileprivate struct WorktreeHistoryToolbarButtonsHost: View {
+    let repositoriesStore: StoreOf<RepositoriesFeature>?
+
+    var body: some View {
+      if let repositoriesStore {
+        WorktreeHistoryToolbarButtons(
+          canGoBack: repositoriesStore.canNavigateWorktreeHistoryBackward,
+          canGoForward: repositoriesStore.canNavigateWorktreeHistoryForward,
+          onBack: { repositoriesStore.send(.worktreeHistoryBack) },
+          onForward: { repositoriesStore.send(.worktreeHistoryForward) }
+        )
+      }
+    }
   }
 
   /// Toolbar notification bell host. Reads `toolbarNotificationGroupsCache`
@@ -446,7 +522,7 @@ struct WorktreeDetailView: View {
     // Folders have no git remote, so the PR payload is scoped to
     // `.git` — this makes "folder with a pull request" unrepresentable.
     enum Kind {
-      case git(pullRequest: GithubPullRequest?)
+      case git(pullRequest: ForgePullRequest?)
       case folder
     }
 
@@ -484,7 +560,7 @@ struct WorktreeDetailView: View {
       return action.remoteOpenDisabledReason(host: remoteOpenHost, remotePath: remoteOpenPath)
     }
 
-    var pullRequest: GithubPullRequest? {
+    var pullRequest: ForgePullRequest? {
       if case .git(let pullRequest) = kind { pullRequest } else { nil }
     }
 
@@ -554,6 +630,11 @@ struct WorktreeDetailView: View {
     let onSelectNotification: (Worktree.ID, WorktreeTerminalNotification) -> Void
 
     var body: some ToolbarContent {
+      // Leading in every detail state so history stays reachable while a worktree loads.
+      ToolbarItem(placement: .navigation) {
+        WorktreeHistoryToolbarButtonsHost(repositoriesStore: repositoriesStore)
+      }
+
       if showsToolbarPlaceholder {
         ToolbarPlaceholderContent(scheme: scheme, includesStatusSkeleton: !showsLoadingWorktree)
         if showsLoadingWorktree {
@@ -640,6 +721,11 @@ struct WorktreeDetailView: View {
       ToolbarItem(placement: .navigation) {
         TerminalSchemeHost(scheme: scheme) {
           WorktreeToolbarTitleView(content: toolbarState.titleContent)
+            // `TerminalSchemeHost` re-hosts its content in a fresh
+            // `NSHostingView`, which starts a new environment rather than
+            // inheriting the window's. Publish the size inside the closure so it
+            // travels with the content value.
+            .appChromeTextSize(settingsFile.global.chromeTextSize)
         }
       }
       .sharedBackgroundVisibility(.hidden)
@@ -755,7 +841,7 @@ struct WorktreeDetailView: View {
 
   /// Trailing git + notifications status toggles, always real controls (never skeletons).
   fileprivate struct TrailingStatusToolbarContent: ToolbarContent {
-    let pullRequest: GithubPullRequest?
+    let pullRequest: ForgePullRequest?
     let repositoriesStore: StoreOf<RepositoriesFeature>?
     let terminalManager: WorktreeTerminalManager
     let inspectorPane: WorktreeInspectorPane
@@ -768,6 +854,12 @@ struct WorktreeDetailView: View {
         // full-opacity tint reads as a stark solid pill against the glass.
         let chromeForeground = terminalManager.chromeOverlayTint()
         let chromeTint = chromeForeground.opacity(0.2)
+        WorktreeFilesToolbarButton(
+          isSelected: inspectorPresented && inspectorPane == .files,
+          tint: chromeTint,
+          foreground: chromeForeground,
+          onActivate: { onActivateInspector(.files) }
+        )
         WorktreeGitStatusButton(
           pullRequest: pullRequest,
           isSelected: inspectorPresented && inspectorPane == .git,
@@ -1014,7 +1106,7 @@ private struct DetailPlaceholderView: View {
       ProgressView()
         .controlSize(.large)
       Text(Self.messages[messageIndex])
-        .font(.title3)
+        .appFont(.title3)
         .foregroundStyle(.secondary)
         .contentTransition(.numericText())
         .shimmer(isActive: true)
@@ -1046,6 +1138,8 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
   // appended by the toolbar) so the group isn't doubled; cold boot keeps them.
   var includesStatusSkeleton: Bool = true
 
+  @Shared(.settingsFile) private var settingsFile
+
   var body: some ToolbarContent {
     ToolbarItem(placement: .navigation) {
       TerminalSchemeHost(scheme: scheme) {
@@ -1056,10 +1150,13 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
               .foregroundStyle(.secondary)
             Text("feature/branch")
           }
-          .font(.headline)
+          .appFont(.headline)
         }
         .redacted(reason: .placeholder)
         .shimmer(isActive: true)
+        // `TerminalSchemeHost` re-hosts in a fresh `NSHostingView`, so the size
+        // must be published inside the closure to travel with the content.
+        .appChromeTextSize(settingsFile.global.chromeTextSize)
       }
     }
     .sharedBackgroundVisibility(.hidden)
@@ -1087,7 +1184,13 @@ private struct ToolbarPlaceholderContent: ToolbarContent {
 
     if includesStatusSkeleton {
       ToolbarItemGroup {
-        // Mirror the trailing inspector toggles (git status + notifications).
+        // Mirror the trailing inspector toggles (files + git status + notifications).
+        Button {
+        } label: {
+          Image(systemName: "list.bullet")
+        }
+        .redacted(reason: .placeholder)
+        .shimmer(isActive: true)
         Button {
         } label: {
           Image(systemName: "arrow.trianglehead.branch")
@@ -1135,7 +1238,7 @@ private struct MultiSelectedWorktreesDetailView: View {
     let deleteShortcut = KeyboardShortcut(.delete, modifiers: [.command, .shift]).display
     VStack(alignment: .leading, spacing: 20) {
       Text("\(rows.count) items selected")
-        .font(.title3)
+        .appFont(.title3)
 
       if !worktreeRows.isEmpty {
         selectionSection(
@@ -1167,12 +1270,12 @@ private struct MultiSelectedWorktreesDetailView: View {
       if isMixedKindSelection {
         VStack(alignment: .leading, spacing: 6) {
           Label("No bulk action available", systemImage: "exclamationmark.triangle")
-            .font(.headline)
+            .appFont(.headline)
           Text(
             "Worktrees and folders don't share bulk actions. Deselect "
               + "one kind to archive/delete worktrees or remove folders."
           )
-          .font(.caption)
+          .appFont(.caption)
           .foregroundStyle(.secondary)
         }
       }
@@ -1191,7 +1294,7 @@ private struct MultiSelectedWorktreesDetailView: View {
   ) -> some View {
     VStack(alignment: .leading, spacing: 8) {
       Text(title)
-        .font(.headline)
+        .appFont(.headline)
       ForEach(Array(rows.prefix(visibleRowsLimit))) { row in
         HStack(alignment: .firstTextBaseline, spacing: 8) {
           Text(row.name)
@@ -1202,23 +1305,23 @@ private struct MultiSelectedWorktreesDetailView: View {
               .lineLimit(1)
           }
         }
-        .font(.body)
+        .appFont(.body)
       }
       if rows.count > visibleRowsLimit {
         Text("+\(rows.count - visibleRowsLimit) more")
-          .font(.caption)
+          .appFont(.caption)
           .foregroundStyle(.secondary)
       }
       if !actions.isEmpty {
         VStack(alignment: .leading, spacing: 4) {
           Text("Available actions")
-            .font(.subheadline)
+            .appFont(.subheadline)
             .foregroundStyle(.secondary)
           ForEach(actions, id: \.self) { action in
             Text(action)
           }
         }
-        .font(.caption)
+        .appFont(.caption)
         .foregroundStyle(.secondary)
         .padding(.top, 4)
       }
@@ -1407,4 +1510,73 @@ private struct WorktreeToolbarPreview: View {
 
 #Preview("Worktree Toolbar") {
   WorktreeToolbarPreview()
+}
+
+extension View {
+  fileprivate func statusToastOverlay(store: StoreOf<RepositoriesFeature>) -> some View {
+    overlay(alignment: .bottomTrailing) {
+      StatusToastOverlay(store: store)
+    }
+  }
+}
+
+/// Observes only `statusToast`, so toast changes don't invalidate the detail body.
+private struct StatusToastOverlay: View {
+  let store: StoreOf<RepositoriesFeature>
+
+  var body: some View {
+    StatusToastView(toast: store.statusToast)
+      .padding()
+  }
+}
+
+struct StatusToastView: View {
+  let toast: RepositoriesFeature.StatusToast?
+
+  var body: some View {
+    Group {
+      if let toast {
+        HStack(spacing: 6) {
+          StatusToastIcon(toast: toast)
+          Text(toast.message)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .glassEffect(.regular, in: .capsule)
+        .transition(.opacity)
+      }
+    }
+    .animation(.easeInOut(duration: 0.2), value: toast)
+  }
+}
+
+private struct StatusToastIcon: View {
+  let toast: RepositoriesFeature.StatusToast
+
+  var body: some View {
+    switch toast {
+    case .inProgress:
+      ProgressView()
+        .controlSize(.small)
+    case .success:
+      Image(systemName: "checkmark.circle.fill")
+        .foregroundStyle(.green)
+        .accessibilityHidden(true)
+    case .info:
+      Image(systemName: "info.circle.fill")
+        .foregroundStyle(.secondary)
+        .accessibilityHidden(true)
+    }
+  }
+}
+
+extension RepositoriesFeature.StatusToast {
+  var message: String {
+    switch self {
+    case .inProgress(let message), .success(let message), .info(let message):
+      message
+    }
+  }
 }

@@ -510,13 +510,81 @@ struct GhosttySurfaceViewTests {
       id: UUID(),
       runtime: GhosttyRuntime(),
       workingDirectory: nil,
+      initialGeometry: .fallback,
       context: GHOSTTY_SURFACE_CONTEXT_TAB
     )
+    defer { surfaceView.closeSurface() }
     let wrapper = GhosttySurfaceScrollView(surfaceView: surfaceView)
 
     #expect(wrapper.safeAreaInsets.top == 0)
     #expect(wrapper.safeAreaInsets.left == 0)
     #expect(wrapper.safeAreaInsets.bottom == 0)
     #expect(wrapper.safeAreaInsets.right == 0)
+  }
+
+  // A remount must reparent the same wrapper, so the live IOSurface keeps its
+  // frames instead of the renderer rebuilding at zero size on every switch.
+  @Test func hostedViewReturnsTheSameWrapperAcrossRemounts() {
+    let surfaceView = GhosttySurfaceView(
+      id: UUID(),
+      runtime: GhosttyRuntime(),
+      workingDirectory: nil,
+      initialGeometry: .fallback,
+      context: GHOSTTY_SURFACE_CONTEXT_TAB
+    )
+    defer { surfaceView.closeSurface() }
+
+    let wrapper = surfaceView.hostedView()
+    #expect(surfaceView.hostedView() === wrapper)
+    // The reuse guard in the content host keys off `scrollWrapper`; it has to
+    // point at the very wrapper `hostedView()` vends.
+    #expect(surfaceView.scrollWrapper === wrapper)
+  }
+
+  // `closeSurface` must clear the cached wrapper so the surface<->wrapper cycle
+  // is broken: proven by `hostedView()` vending a fresh instance afterwards. If
+  // the release is ever dropped, the same wrapper comes back and both leak.
+  @Test func closeSurfaceClearsTheCachedWrapper() {
+    let surfaceView = GhosttySurfaceView(
+      id: UUID(),
+      runtime: GhosttyRuntime(),
+      workingDirectory: nil,
+      initialGeometry: .fallback,
+      context: GHOSTTY_SURFACE_CONTEXT_TAB
+    )
+    defer { surfaceView.closeSurface() }
+
+    let first = surfaceView.hostedView()
+    surfaceView.closeSurface()
+    let second = surfaceView.hostedView()
+
+    #expect(first !== second)
+    #expect(surfaceView.scrollWrapper === second)
+  }
+
+  // `closeSurface` detaches synchronously (surface cleared, view hidden so the
+  // "[Process exited]" overlay can't flash during a collapse) and defers the
+  // costly `ghostty_surface_free` off the turn, and a second close is a safe
+  // no-op. Only the hide needs a live renderer, absent when the display sleeps;
+  // the synchronous clear and the double-close no-op hold on both paths.
+  @Test func closeSurfaceDetachesSynchronouslyAndHidesTheView() {
+    let surfaceView = GhosttySurfaceView(
+      id: UUID(),
+      runtime: GhosttyRuntime(),
+      workingDirectory: nil,
+      initialGeometry: .fallback,
+      context: GHOSTTY_SURFACE_CONTEXT_TAB
+    )
+    let hadLiveRenderer = surfaceView.surface != nil
+
+    surfaceView.closeSurface()
+    #expect(surfaceView.surface == nil)
+    if hadLiveRenderer {
+      #expect(surfaceView.isHidden)
+    }
+
+    // Idempotent: the surface is already gone, so this must not double-free.
+    surfaceView.closeSurface()
+    #expect(surfaceView.surface == nil)
   }
 }

@@ -28,7 +28,7 @@ struct CodingAgentsSidebarCardView: View {
   /// pure and free of hidden global reads.
   static func resolveMode(for store: StoreOf<AppFeature>, dismissedAt: Date) -> Mode {
     Self.mode(
-      for: store.settings.agentIntegrationStates,
+      for: store.settings.standardAgentIntegrationStates,
       dismissed: Self.isDismissed(at: dismissedAt)
     )
   }
@@ -68,6 +68,10 @@ struct CodingAgentsSidebarCardView: View {
   ) -> Mode {
     let stillChecking = SkillAgent.allCases.contains { states[$0]?.isResolved != true }
     if stillChecking { return .hidden }
+    // Never upsell an install we can't rule out: an unreadable probe would
+    // otherwise read as "nobody has it installed".
+    let anyUndetermined = SkillAgent.allCases.contains { states[$0]?.isUndetermined == true }
+    if anyUndetermined { return .hidden }
     let anyInstalled = SkillAgent.allCases.contains {
       states[$0]?.integrationState == .installed
     }
@@ -97,7 +101,7 @@ private struct CodingAgentsCardBody: View {
           openWindow(id: WindowID.settings)
         }
         .buttonStyle(.link)
-        .font(.caption)
+        .appFont(.caption)
         .padding(.top, 2)
       }
     } header: {
@@ -114,7 +118,7 @@ extension AgentIntegrationRowState {
 
   fileprivate var isResolved: Bool {
     switch self {
-    case .ready, .failed, .failedTransient: true
+    case .ready, .failed, .failedTransient, .undetermined: true
     case .checking, .installing, .uninstalling: false
     }
   }

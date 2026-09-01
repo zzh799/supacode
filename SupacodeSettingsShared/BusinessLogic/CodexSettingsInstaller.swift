@@ -10,34 +10,42 @@ nonisolated struct CodexSettingsInstaller {
     let standardError: String
   }
 
-  let homeDirectoryURL: URL
+  let configDirectoryURL: URL
   let fileManager: FileManager
   let runEnableHooksCommand: @Sendable () async throws -> CommandResult
 
   init(
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+    configDirectoryURL: URL? = nil,
     fileManager: FileManager = .default
   ) {
+    // The enable-hooks CLI must run against the resolved dir too, so it's
+    // threaded in as `CODEX_HOME`.
+    let resolved =
+      configDirectoryURL ?? homeDirectoryURL.appending(path: ".codex", directoryHint: .isDirectory)
     self.init(
       homeDirectoryURL: homeDirectoryURL,
+      configDirectoryURL: resolved,
       fileManager: fileManager,
-      runEnableHooksCommand: Self.runEnableHooksCommand
+      runEnableHooksCommand: { try await Self.runEnableHooksCommand(codexHomeURL: resolved) }
     )
   }
 
   init(
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+    configDirectoryURL: URL? = nil,
     fileManager: FileManager = .default,
     runEnableHooksCommand: @escaping @Sendable () async throws -> CommandResult
   ) {
-    self.homeDirectoryURL = homeDirectoryURL
+    self.configDirectoryURL =
+      configDirectoryURL ?? homeDirectoryURL.appending(path: ".codex", directoryHint: .isDirectory)
     self.fileManager = fileManager
     self.runEnableHooksCommand = runEnableHooksCommand
   }
 
   /// Install state for the unified hook map. See
   /// `ClaudeSettingsInstaller.installState()` for rationale.
-  func installState() -> ComponentInstallState {
+  func installState() throws -> ComponentInstallState {
     let groups: [String: [JSONValue]]
     do {
       groups = try CodexHookSettings.hooksByEvent()
@@ -45,8 +53,8 @@ nonisolated struct CodexSettingsInstaller {
       Self.reportInvalidHookConfiguration(error)
       return .notInstalled
     }
-    let hooksState = fileInstaller.installState(settingsURL: settingsURL, hookGroupsByEvent: groups)
-    let featuresState = featuresConfigState()
+    let hooksState = try fileInstaller.installState(settingsURL: settingsURL, hookGroupsByEvent: groups)
+    let featuresState = try featuresConfigState()
     switch (hooksState, featuresState) {
     case (.installed, .upToDate): return .installed
     case (.notInstalled, .absent): return .notInstalled
@@ -84,10 +92,11 @@ nonisolated struct CodexSettingsInstaller {
   /// lines so a TOML array value (`plugins = ["x"]`) inside the section
   /// can't truncate detection, and a commented-out `# codex_hooks = true`
   /// can't false-positive as `.legacy`.
-  private func featuresConfigState() -> FeaturesConfigState {
-    let url = homeDirectoryURL.appending(
-      path: ".codex/config.toml", directoryHint: .notDirectory)
-    guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return .absent }
+  private func featuresConfigState() throws -> FeaturesConfigState {
+    let url = configDirectoryURL.appending(path: "config.toml", directoryHint: .notDirectory)
+    // Throws rather than reporting `.absent`: reading the flag as unset would
+    // send the auto-update off to rewrite a config file we never managed to read.
+    guard let contents = try AgentFileProbe.text(at: url) else { return .absent }
     let flags = Self.featuresFlags(in: contents)
     if flags.legacy { return .legacy }
     if flags.modern { return .upToDate }
@@ -173,8 +182,7 @@ nonisolated struct CodexSettingsInstaller {
   private func rewriteFeaturesSection(
     transform: (Substring, _ inFeaturesSection: Bool) -> Substring?
   ) {
-    let url = homeDirectoryURL.appending(
-      path: ".codex/config.toml", directoryHint: .notDirectory)
+    let url = configDirectoryURL.appending(path: "config.toml", directoryHint: .notDirectory)
     let original: String
     do {
       original = try String(contentsOf: url, encoding: .utf8)
@@ -209,7 +217,7 @@ nonisolated struct CodexSettingsInstaller {
   }
 
   private var settingsURL: URL {
-    Self.settingsURL(homeDirectoryURL: homeDirectoryURL)
+    configDirectoryURL.appending(path: "hooks.json", directoryHint: .notDirectory)
   }
 
   static func settingsURL(homeDirectoryURL: URL) -> URL {
@@ -230,12 +238,20 @@ nonisolated struct CodexSettingsInstaller {
   /// hang the drain past the timeout (#504).
   private static let drainDeadlineSeconds: UInt64 = enableHooksTimeoutSeconds + terminateGraceSeconds + 3
 
-  static func runEnableHooksCommand() async throws -> CommandResult {
+  /// Enables Codex hooks in `codexHomeURL`. Uses `env` (not a bare `VAR=val`
+  /// prefix) because `loginShellCommandInvocation` wraps this in `exec`, and
+  /// `exec CODEX_HOME=... codex` would try to exec a file named `CODEX_HOME=...`.
+  static func enableHooksInnerCommand(codexHomeURL: URL) -> String {
+    let quoted = "'" + codexHomeURL.path(percentEncoded: false).replacing("'", with: "'\\''") + "'"
+    return "env CODEX_HOME=\(quoted) codex features enable hooks"
+  }
+
+  static func runEnableHooksCommand(codexHomeURL: URL) async throws -> CommandResult {
     let process = Process()
     // Source the user's rc so a version-manager Codex on the interactive PATH is found (#504).
-    // `codex_hooks` was renamed to `hooks` in newer Codex versions; the legacy name is deprecated.
     let (shell, command) = ShellClient.loginShellCommandInvocation(
-      "codex features enable hooks", userShell: loginShellURL())
+      Self.enableHooksInnerCommand(codexHomeURL: codexHomeURL),
+      userShell: loginShellURL(), workingDirectory: nil)
     process.executableURL = shell
     process.arguments = ["-l", "-c", command]
     let errorPipe = Pipe()

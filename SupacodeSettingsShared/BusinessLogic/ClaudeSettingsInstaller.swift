@@ -1,21 +1,23 @@
 import Foundation
 
 nonisolated struct ClaudeSettingsInstaller {
-  let homeDirectoryURL: URL
+  let configDirectoryURL: URL
   let fileManager: FileManager
 
   init(
     homeDirectoryURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+    configDirectoryURL: URL? = nil,
     fileManager: FileManager = .default
   ) {
-    self.homeDirectoryURL = homeDirectoryURL
+    self.configDirectoryURL =
+      configDirectoryURL ?? homeDirectoryURL.appending(path: ".claude", directoryHint: .isDirectory)
     self.fileManager = fileManager
   }
 
   /// Install state for the unified hook map. The file installer's prune
   /// step covers every event the integration writes, eliminating stale
   /// duplicates left by older Supacode versions.
-  func installState() -> ComponentInstallState {
+  func installState() throws -> ComponentInstallState {
     let groups: [String: [JSONValue]]
     do {
       groups = try ClaudeHookSettings.hooksByEvent()
@@ -23,7 +25,7 @@ nonisolated struct ClaudeSettingsInstaller {
       Self.reportInvalidHookConfiguration(error)
       return .notInstalled
     }
-    return fileInstaller.installState(settingsURL: settingsURL, hookGroupsByEvent: groups)
+    return try fileInstaller.installState(settingsURL: settingsURL, hookGroupsByEvent: groups)
   }
 
   func installAllHooks() throws {
@@ -47,7 +49,7 @@ nonisolated struct ClaudeSettingsInstaller {
   }
 
   private var settingsURL: URL {
-    Self.settingsURL(homeDirectoryURL: homeDirectoryURL)
+    configDirectoryURL.appending(path: "settings.json", directoryHint: .notDirectory)
   }
 
   static func settingsURL(homeDirectoryURL: URL) -> URL {

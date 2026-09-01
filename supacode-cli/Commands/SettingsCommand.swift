@@ -12,6 +12,7 @@ struct SettingsCommand: ParsableCommand {
       Shortcuts.self,
       Scripts.self,
       Updates.self,
+      Forges.self,
       Github.self,
       Repo.self,
     ]
@@ -38,6 +39,7 @@ extension SettingsCommand {
     case scripts
     case updates
     case github
+    case forges
   }
 
   struct General: ParsableCommand {
@@ -82,8 +84,17 @@ extension SettingsCommand {
     func run() throws { try dispatchSettings(.updates, timeoutSeconds: timeoutOption.timeout) }
   }
 
+  struct Forges: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Open Git Forges settings.")
+    @OptionGroup var timeoutOption: TimeoutOption
+    func run() throws { try dispatchSettings(.forges, timeoutSeconds: timeoutOption.timeout) }
+  }
+
   struct Github: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Open GitHub settings.")
+    static let configuration = CommandConfiguration(
+      abstract: "Open Git Forges settings (alias).",
+      shouldDisplay: false
+    )
     @OptionGroup var timeoutOption: TimeoutOption
     func run() throws { try dispatchSettings(.github, timeoutSeconds: timeoutOption.timeout) }
   }
@@ -98,7 +109,7 @@ extension SettingsCommand {
     @OptionGroup var timeoutOption: TimeoutOption
 
     func run() throws {
-      let rID = try resolveRepoID(options.repo)
+      let rID = try IDResolvers.resolveRepoID(options.repo)
       try Dispatcher.dispatch(
         deeplinkURL: DeeplinkURLBuilder.settingsRepo(repoID: rID),
         timeoutSeconds: timeoutOption.timeout
@@ -112,7 +123,7 @@ extension SettingsCommand {
       @OptionGroup var timeoutOption: TimeoutOption
 
       func run() throws {
-        let rID = try resolveRepoID(options.repo)
+        let rID = try IDResolvers.resolveRepoID(options.repo)
         try Dispatcher.dispatch(
           deeplinkURL: DeeplinkURLBuilder.settingsRepoScripts(repoID: rID),
           timeoutSeconds: timeoutOption.timeout

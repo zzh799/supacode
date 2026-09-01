@@ -1,3 +1,4 @@
+import SupacodeSettingsFeature
 import SupacodeSettingsShared
 import SwiftUI
 
@@ -29,7 +30,7 @@ struct HotkeyCellView: View {
             .foregroundStyle(isModified ? .primary : .secondary)
           if let warning {
             Image(systemName: "exclamationmark.triangle.fill")
-              .font(.caption2)
+              .appFont(.caption2)
               .foregroundStyle(.yellow)
               .accessibilityLabel("Warning")
               .help(warning)

@@ -1,5 +1,7 @@
+import AppKit
 import Carbon.HIToolbox
 import SwiftUI
+import Synchronization
 
 // Persisted override for an app shortcut binding.
 public nonisolated struct AppShortcutOverride: Codable, Equatable, Hashable, Sendable {
@@ -80,7 +82,7 @@ extension AppShortcutOverride {
     if modifiers.contains(.shift) { parts.append("⇧") }
     if modifiers.contains(.option) { parts.append("⌥") }
     if modifiers.contains(.control) { parts.append("⌃") }
-    parts.append(displayCharacter(for: keyCode, modifiers: modifiers))
+    parts.append(displayCharacter(for: keyCode))
     return parts
   }
 }
@@ -89,7 +91,8 @@ extension AppShortcutOverride {
 
 extension AppShortcutOverride {
   // Well-known macOS app conventions always reserved by AppKit (not in the symbolic hotkeys plist).
-  public static let appKitReservedDisplayStrings: Set<String> = ["⌘Q", "⌘W", "⌘H", "⌘M"]
+  // ⌘W included: it is hardcoded to Close Tab, so the recorder must refuse it.
+  public static let appKitReservedDisplayStrings: Set<String> = ["⌘Q", "⌘H", "⌘M", "⌘W"]
 
   // Reads macOS system symbolic hotkeys at runtime and returns their display strings,
   // combined with well-known AppKit reserved shortcuts.
@@ -116,16 +119,36 @@ extension AppShortcutOverride {
       else {
         continue
       }
-      // Carbon modifier flags: cmdKey=0x100, shiftKey=0x200, optionKey=0x800, controlKey=0x1000.
-      var flags: ModifierFlags = []
-      if modifierFlags & 0x100 != 0 { flags.insert(.command) }
-      if modifierFlags & 0x200 != 0 { flags.insert(.shift) }
-      if modifierFlags & 0x800 != 0 { flags.insert(.option) }
-      if modifierFlags & 0x1000 != 0 { flags.insert(.control) }
+      let flags = Self.modifierFlags(fromSymbolicHotkeyMask: modifierFlags)
       let override = AppShortcutOverride(keyCode: UInt16(keyCode), modifiers: flags)
       result.insert(override.displayString)
     }
     return result
+  }
+
+  // AppleSymbolicHotKeys stores the modifier field as an NSEvent mask
+  // (command = 1 << 20, etc.), not Carbon bits.
+  public static func modifierFlags(fromSymbolicHotkeyMask mask: Int) -> ModifierFlags {
+    var flags: ModifierFlags = []
+    if mask & Int(NSEvent.ModifierFlags.command.rawValue) != 0 { flags.insert(.command) }
+    if mask & Int(NSEvent.ModifierFlags.shift.rawValue) != 0 { flags.insert(.shift) }
+    if mask & Int(NSEvent.ModifierFlags.option.rawValue) != 0 { flags.insert(.option) }
+    if mask & Int(NSEvent.ModifierFlags.control.rawValue) != 0 { flags.insert(.control) }
+    return flags
+  }
+}
+
+// MARK: - Carbon hotkey registration.
+
+extension AppShortcutOverride {
+  // Carbon modifier mask for `RegisterEventHotKey` (cmdKey, shiftKey, etc.).
+  public var carbonModifierFlags: UInt32 {
+    var mask: UInt32 = 0
+    if modifiers.contains(.command) { mask |= UInt32(cmdKey) }
+    if modifiers.contains(.shift) { mask |= UInt32(shiftKey) }
+    if modifiers.contains(.option) { mask |= UInt32(optionKey) }
+    if modifiers.contains(.control) { mask |= UInt32(controlKey) }
+    return mask
   }
 }
 
@@ -288,9 +311,47 @@ extension AppShortcutOverride {
     return nil
   }
 
+  // Uncached resolution walks 4 modifier states x 47 key codes through
+  // UCKeyTranslate; per-event matching would be a TIS storm without this.
+  private static let reverseKeyCodeCache = Mutex<[Character: UInt16?]>([:])
+
+  private static let reverseKeyCodeCacheInvalidator: NSObjectProtocol =
+    NotificationCenter.default.addObserver(
+      forName: NSTextInputContext.keyboardSelectionDidChangeNotification,
+      object: nil,
+      queue: nil
+    ) { _ in
+      reverseKeyCodeCache.withLock { $0.removeAll() }
+    }
+
   public static func keyCode(forDisplayedKeyEquivalent character: Character) -> UInt16? {
-    keyCode(forDisplayedKeyEquivalent: character) { code, modifierState in
+    _ = reverseKeyCodeCacheInvalidator
+    if let cached = reverseKeyCodeCache.withLock({ $0[character] }) {
+      return cached
+    }
+    let resolved = keyCode(forDisplayedKeyEquivalent: character) { code, modifierState in
       currentLayoutCharacter(for: code, modifierState: modifierState)
+    }
+    // Store misses too: subscript-assigning nil would delete the entry, so an
+    // unresolvable key re-runs the layout scan on every event.
+    reverseKeyCodeCache.withLock { _ = $0.updateValue(resolved, forKey: character) }
+    return resolved
+  }
+
+  // Key codes for the special-key equivalents, which no layout scan can
+  // resolve; lets `matches` cover arrow, return, and escape chords.
+  public static func specialKeyCode(for keyEquivalent: KeyEquivalent) -> UInt16? {
+    switch keyEquivalent {
+    case .leftArrow: UInt16(kVK_LeftArrow)
+    case .rightArrow: UInt16(kVK_RightArrow)
+    case .upArrow: UInt16(kVK_UpArrow)
+    case .downArrow: UInt16(kVK_DownArrow)
+    case .return: UInt16(kVK_Return)
+    case .escape: UInt16(kVK_Escape)
+    case .delete: UInt16(kVK_Delete)
+    case .tab: UInt16(kVK_Tab)
+    case .space: UInt16(kVK_Space)
+    default: nil
     }
   }
 
@@ -328,7 +389,7 @@ extension AppShortcutOverride {
     case kVK_RightArrow: "arrow_right"
     case kVK_UpArrow: "arrow_up"
     case kVK_DownArrow: "arrow_down"
-    case kVK_Return: "return"
+    case kVK_Return: "enter"
     case kVK_Escape: "escape"
     case kVK_Delete: "backspace"
     case kVK_Tab: "tab"
@@ -337,7 +398,7 @@ extension AppShortcutOverride {
     }
   }
 
-  public static func displayCharacter(for code: UInt16, modifiers: ModifierFlags = []) -> String {
+  public static func displayCharacter(for code: UInt16) -> String {
     switch Int(code) {
     case kVK_LeftArrow: return "←"
     case kVK_RightArrow: return "→"
@@ -349,10 +410,8 @@ extension AppShortcutOverride {
     case kVK_Tab: return "⇥"
     case kVK_Space: return "Space"
     default:
-      let modifierState = displayModifierState(for: modifiers)
-      if let character = currentLayoutCharacter(for: code, modifierState: modifierState) {
-        return character.uppercased()
-      }
+      // Show the key's base legend (its unmodified cap character). Applying shift
+      // or option would print a dead key or alternate glyph, not the shortcut key.
       return layoutCharacter(for: code)?.uppercased() ?? String(format: "0x%02x", code)
     }
   }
@@ -375,14 +434,5 @@ extension AppShortcutOverride {
       }
       return KeyEquivalent(char)
     }
-  }
-
-  // Only shift and option affect the printed character; command and control
-  // do not alter UCKeyTranslate output.
-  private static func displayModifierState(for modifiers: ModifierFlags) -> UInt32 {
-    var state: UInt32 = 0
-    if modifiers.contains(.shift) { state |= 0x02 }
-    if modifiers.contains(.option) { state |= 0x08 }
-    return state
   }
 }

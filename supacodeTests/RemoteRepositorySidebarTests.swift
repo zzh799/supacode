@@ -28,6 +28,13 @@ struct RemoteRepositoryHelpersTests {
     #expect(id == "devbox/tmp/repo/wt")
   }
 
+  @Test func remoteWorktreeIDTrimsTrailingSlash() {
+    // A path that exists locally as a directory picks up a trailing slash on
+    // the URL round-trip; the id must stay slash-free regardless of disk state.
+    let id = RepositoriesFeature.remoteWorktreeID(host: RemoteHost(alias: "devbox"), worktreePath: "/tmp/repo/wt/")
+    #expect(id == "devbox/tmp/repo/wt")
+  }
+
   @Test func remoteWorktreeInjectsHostAndHostKeyedID() {
     let host = RemoteHost(alias: "devbox", username: "alice")
     let base = Worktree(
@@ -225,7 +232,7 @@ struct RemoteSidebarMergedListTests {
       displayName: "docs"
     )
     let repoID = RepositoriesFeature.remoteRepositoryID(for: config)
-    let folderRepo = RepositoriesFeature.remoteFolderRepository(config: config, repoID: repoID)
+    let folderRepo = RepositoriesFeature.remoteFolderRepository(config: config)
     let state = makeState(repositories: [folderRepo])
 
     let structure = state.computeSidebarStructure(groupPinned: false, groupActive: false)
@@ -397,21 +404,49 @@ struct RemoteDisconnectCurationTests {
 struct RemoteDefaultShellCommandTests {
   @Test func buildsCdIntoRemotePathThenExecLoginShell() {
     #expect(
-      WorktreeTerminalState.remoteDefaultShellCommand(remotePath: "/home/me/proj")
+      TerminalSurfaceRecipe.remoteDefaultShellCommand(remotePath: "/home/me/proj")
         == "cd '/home/me/proj' 2>/dev/null; exec \"$SHELL\" -l"
     )
   }
 
   @Test func escapesSingleQuotesInRemotePath() {
     #expect(
-      WorktreeTerminalState.remoteDefaultShellCommand(remotePath: "/home/o'brien/proj")
-        == "cd '/home/o'\\''brien/proj' 2>/dev/null; exec \"$SHELL\" -l"
+      TerminalSurfaceRecipe.remoteDefaultShellCommand(remotePath: "/home/o'brien/proj")
+        == "cd '/home/o'\"'\"'brien/proj' 2>/dev/null; exec \"$SHELL\" -l"
     )
   }
 
+  @Test(arguments: LoginShellProbe.quotingContractShells)
+  func changesToRemotePathWithoutChangingBytesUnder(_ shell: String) async throws {
+    try await LoginShellProbe.withTemporaryDirectory("default-shell-\(shell)") { temporaryRoot in
+      let remoteDirectory = temporaryRoot.appending(path: #"working:it's\literal"#)
+      try FileManager.default.createDirectory(at: remoteDirectory, withIntermediateDirectories: true)
+      // A relative `$SHELL` that only resolves from inside the worktree, so a
+      // swallowed `cd` failure cannot pass. It echoes its argv too, pinning the
+      // `-l` that makes the remote shell a login shell.
+      let probe = remoteDirectory.appending(path: "probe-shell")
+      try Data(#"#!/bin/sh\#nprintf '%s %s' "$(pwd -P)" "$1"\#n"#.utf8).write(to: probe)
+      try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: probe.path)
+
+      let command = try #require(
+        TerminalSurfaceRecipe.remoteDefaultShellCommand(remotePath: remoteDirectory.path)
+      )
+      let result = try await LoginShellProbe.run(
+        shell,
+        command: command,
+        configRoot: temporaryRoot.appending(path: "config"),
+        shellPathOverride: "./probe-shell"
+      )
+
+      #expect(result.status == 0, "\(shell) rejected the remote worktree path: \(result.stderr)")
+      #expect(result.stdout == "\(LoginShellProbe.physicalPath(of: remoteDirectory)) -l")
+      #expect(result.shellDiagnostics.isEmpty, "\(shell): \(result.shellDiagnostics)")
+    }
+  }
+
   @Test func nilForRootOrEmptyPath() {
-    #expect(WorktreeTerminalState.remoteDefaultShellCommand(remotePath: "/") == nil)
-    #expect(WorktreeTerminalState.remoteDefaultShellCommand(remotePath: "   ") == nil)
+    #expect(TerminalSurfaceRecipe.remoteDefaultShellCommand(remotePath: "/") == nil)
+    #expect(TerminalSurfaceRecipe.remoteDefaultShellCommand(remotePath: "   ") == nil)
   }
 }
 
@@ -452,7 +487,8 @@ struct RemoteWorktreeInfoTests {
     // work, so an exhaustive TestStore send with no trailing closure passes.
     await store.send(
       .worktreeInfoEvent(
-        .repositoryPullRequestRefresh(repositoryRootURL: repository.rootURL, worktreeIDs: [worktree.id])
+        .repositoryPullRequestRefresh(
+          repositoryRootURL: repository.rootURL, worktreeIDs: [worktree.id], trigger: .automatic)
       )
     )
   }
@@ -750,6 +786,27 @@ struct SaveRemoteConnectionTests {
       #expect(store.state.sidebar.sections[targetID] == nil)
     }
   }
+
+  @Test(.dependencies) func repositoriesRemovedPrunesRemoteConfig() async {
+    // The folder-delete pipeline's batch terminal must drop the remote config,
+    // or the `.repositoriesLoaded` roster merge resurrects the removed repo.
+    await withRemoteStore { store in
+      let target = TestRemoteRepo(
+        host: RemoteHost(alias: "devbox"),
+        remotePath: "/home/me/notes",
+        displayName: ""
+      )
+      @Shared(.settingsFile) var settingsFile
+      $settingsFile.withLock { $0.remoteRepositoryRoots = [target.id.rawValue] }
+      let repo = RepositoriesFeature.remoteFolderRepository(config: target)
+
+      await store.send(.repositoriesRemoved([repo.id], selectionWasRemoved: false))
+      await store.finish()
+
+      #expect(remoteRepositories().isEmpty)
+      #expect(store.state.repositories[id: repo.id] == nil)
+    }
+  }
 }
 
 struct RemotePathClassificationTests {
@@ -916,7 +973,20 @@ struct RemotePathClassificationTests {
     #expect(resolved == nil)
   }
 
-  @Test func parseRemoteWorktreeBaseDirectoriesExtractsPerRepoAndGlobal() throws {
+  @Test func parseRemoteWorktreeBaseDirectoriesExtractsPerRepoAndFlatGlobal() throws {
+    var repoSettings = RepositorySettings.default
+    repoSettings.worktreeBaseDirectoryPath = "/srv/wt"
+    var global = GlobalSettings.default
+    global.defaultWorktreeBaseDirectoryPath = "/srv/global"
+    let repoJSON = try #require(String(bytes: try JSONEncoder().encode(repoSettings), encoding: .utf8))
+    let globalJSON = try #require(String(bytes: try JSONEncoder().encode(global), encoding: .utf8))
+    let output = "===SUPACODE-REPO===\n\(repoJSON)\n===SUPACODE-GLOBAL===\n\(globalJSON)"
+    let result = RepositoriesFeature.parseRemoteWorktreeBaseDirectories(output)
+    #expect(result.perRepo == "/srv/wt")
+    #expect(result.global == "/srv/global")
+  }
+
+  @Test func parseRemoteWorktreeBaseDirectoriesReadsLegacyWrappedGlobal() throws {
     var repoSettings = RepositorySettings.default
     repoSettings.worktreeBaseDirectoryPath = "/srv/wt"
     var global = GlobalSettings.default
@@ -951,7 +1021,7 @@ struct RemotePathClassificationTests {
       displayName: ""
     )
     let repoID = RepositoriesFeature.remoteRepositoryID(for: config)
-    let repo = RepositoriesFeature.remoteFolderRepository(config: config, repoID: repoID)
+    let repo = RepositoriesFeature.remoteFolderRepository(config: config)
 
     #expect(repo.isGitRepository == false)
     #expect(repo.host?.sshDestination == "devbox")
