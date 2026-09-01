@@ -64,7 +64,7 @@ struct PaneRenderContext {
   var isLifecycleBusy = false
   var showWindowedPane: (PaneID) -> Void = { _ in }
   /// Shared tab-drag source, so a pane's split zones can gray out invalid drops.
-  var dragModel = PaneTabDragModel()
+  var dragModel = MainActor.assumeIsolated { PaneTabDragModel() }
 }
 
 /// Renders the pane tree itself: the split structure over panes, each pane a

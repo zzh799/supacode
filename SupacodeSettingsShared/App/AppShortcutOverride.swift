@@ -315,7 +315,9 @@ extension AppShortcutOverride {
   // UCKeyTranslate; per-event matching would be a TIS storm without this.
   private static let reverseKeyCodeCache = Mutex<[Character: UInt16?]>([:])
 
-  private static let reverseKeyCodeCacheInvalidator: NSObjectProtocol =
+  // Lazily registered observer that invalidates the reverse key-code cache;
+  // the returned NSObjectProtocol token is only ever read after initialization.
+  private nonisolated(unsafe) static let reverseKeyCodeCacheInvalidator: NSObjectProtocol =
     NotificationCenter.default.addObserver(
       forName: NSTextInputContext.keyboardSelectionDidChangeNotification,
       object: nil,

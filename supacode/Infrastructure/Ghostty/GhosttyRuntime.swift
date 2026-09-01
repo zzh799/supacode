@@ -487,7 +487,9 @@ final class GhosttyRuntime {
     guard target.tag == GHOSTTY_TARGET_SURFACE else { return false }
     guard let surface = target.target.surface else { return false }
     guard let bridge = surfaceBridge(fromSurface: surface) else { return false }
-    return bridge.handleAction(target: target, action: action)
+    return MainActor.assumeIsolated {
+      bridge.handleAction(target: target, action: action)
+    }
   }
 
   private static func readClipboard(
@@ -497,16 +499,17 @@ final class GhosttyRuntime {
   ) -> Bool {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
-      return false
+    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return false }
+    return MainActor.assumeIsolated {
+      guard let surface = bridge.surface else { return false }
+      guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
+        return false
+      }
+      value.withCString { ptr in
+        ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
+      }
+      return true
     }
-    guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
-      return false
-    }
-    value.withCString { ptr in
-      ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
-    }
-    return true
   }
 
   private static func confirmReadClipboard(
@@ -518,11 +521,12 @@ final class GhosttyRuntime {
     _ = request
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
-      return
-    }
-    value.withCString { ptr in
-      ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
+    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
+    MainActor.assumeIsolated {
+      guard let surface = bridge.surface else { return }
+      value.withCString { ptr in
+        ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
+      }
     }
   }
 
@@ -545,7 +549,9 @@ final class GhosttyRuntime {
   private static func closeSurface(userdataBits: UInt?, processAlive: Bool) {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
-    bridge.closeSurface(processAlive: processAlive)
+    MainActor.assumeIsolated {
+      bridge.closeSurface(processAlive: processAlive)
+    }
   }
 
   private func setConfig(_ config: ghostty_config_t) {

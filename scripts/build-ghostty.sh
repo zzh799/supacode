@@ -39,7 +39,7 @@ print_fingerprint() {
       shasum -a 256 "${script_path}" | awk '{print $1}'
       shasum -a 256 "${srcroot}/mise.toml" | awk '{print $1}'
       # The patches are applied at build time, so an edited patch must bust the cache.
-      for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
+      for patch in "${ghostty_patches_dir}"/*.patch; do
         [ -e "${patch}" ] || continue
         basename "${patch}"
         shasum -a 256 "${patch}" | awk '{print $1}'
@@ -99,7 +99,7 @@ reset_ghostty_patch_files() {
 apply_ghostty_patches() {
   [ -d "${ghostty_patches_dir}" ] || return 0
   local patch
-  for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
+  for patch in "${ghostty_patches_dir}"/*.patch; do
     [ -e "${patch}" ] || continue
     if git -C "${ghostty_dir}" apply --reverse --check "${patch}" 2>/dev/null; then
       continue # already fully applied
@@ -123,7 +123,7 @@ apply_ghostty_patches() {
 revert_ghostty_patches() {
   [ -d "${ghostty_patches_dir}" ] || return 0
   local patch
-  for patch in "${ghostty_patches_dir}"/ghostty-*.patch; do
+  for patch in "${ghostty_patches_dir}"/*.patch; do
     [ -e "${patch}" ] || continue
     # Prefer a clean reverse-apply; fall back to resetting just the patched files.
     # The fallback also guards against `set -e` aborting the trap mid-revert if the

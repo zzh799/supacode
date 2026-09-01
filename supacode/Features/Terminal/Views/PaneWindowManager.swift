@@ -150,8 +150,10 @@ final class PaneWindowManager {
     }
   }
 
-  isolated deinit {
-    appObservers.forEach { NotificationCenter.default.removeObserver($0) }
+  deinit {
+    MainActor.assumeIsolated {
+      appObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
   }
 
   /// Opens missing windows and closes stale ones for the worktree. A window

@@ -431,6 +431,7 @@ public struct SettingsFeature {
         // has nothing to audition.
         let shouldPreview = !state.systemNotificationsEnabled && sound != .never
         state.syncGlobalDefaults()
+        let notificationSoundClient = notificationSoundClient
         return .merge(
           persist(state),
           shouldPreview ? .run { _ in await notificationSoundClient.play(sound) } : .none
@@ -937,6 +938,7 @@ public struct SettingsFeature {
 
       case .alert(.presented(.openSystemNotificationSettings)):
         state.alert = nil
+        let systemNotificationClient = systemNotificationClient
         return .run { _ in
           await systemNotificationClient.openSettings()
         }
