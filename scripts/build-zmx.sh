@@ -17,23 +17,9 @@ zmx_build_root="${srcroot}/.build/zmx"
 zmx_global_cache_dir="${zmx_build_root}/.zig-global-cache"
 zmx_fingerprint_path="${zmx_build_root}/fingerprint"
 zmx_binary_path="${zmx_build_root}/bin/zmx"
-
-# zmx (and the ghostty 1.3.x it vendors) require Zig 0.15.x, which differs
-# from the 0.14.1 pinned in mise.toml for the vendored ghostty v1.2.3. Pin the
-# toolchain explicitly so the two never interfere with each other's caches.
-zmx_zig_version="0.15.2"
-
-# zmx's build.zig.zon depends on ghostty via `git+https://github.com/...`.
-# Zig's built-in git client cannot use the local proxy for github.com, so the
-# build script swaps that URL for a local `git+http://127.0.0.1:PORT` mirror
-# (served from a bare clone of the upstream repo) by applying this patch for
-# the duration of the build and reverting it afterwards.
-zmx_patch_path="${srcroot}/patches/zmx-local-ghostty-mirror.patch"
-ghostty_mirror_path="${srcroot}/.build/ghostty-upstream.git"
-ghostty_mirror_commit="c74f6d56d1feef473033057bc0ff7e3f00cf6421"
-git_http_port="8765"
-git_http_script="${script_dir}/git-http-server.py"
-git_http_server_pid=""
+# Out-of-tree patches applied to the pinned zmx submodule at build time.
+# The submodule pointer stays on the fork's SHA; we never commit into it.
+zmx_patches_dir="${srcroot}/patches/zmx"
 
 # Mirror Xcode's ARCHS_STANDARD for macOS (arm64, x86_64); resync if Configurations/Project.xcconfig pins ARCHS.
 # Unconditional: every build emits both slices regardless of CONFIGURATION / ONLY_ACTIVE_ARCH.
@@ -51,75 +37,15 @@ print_fingerprint() {
       git ls-files --others --exclude-standard | LC_ALL=C sort | shasum -a 256
       shasum -a 256 "${script_path}" | awk '{print $1}'
       shasum -a 256 "${srcroot}/mise.toml" | awk '{print $1}'
-      shasum -a 256 "${zmx_patch_path}" | awk '{print $1}'
-      shasum -a 256 "${git_http_script}" | awk '{print $1}'
+      # The patches are applied at build time, so an edited patch must bust the cache.
+      for patch in "${zmx_patches_dir}"/*.patch; do
+        [ -e "${patch}" ] || continue
+        basename "${patch}"
+        shasum -a 256 "${patch}" | awk '{print $1}'
+      done | shasum -a 256
     } | shasum -a 256 | awk '{print $1}'
   )
 }
-
-ensure_ghostty_mirror() {
-  if [ -d "${ghostty_mirror_path}" ] &&
-    git --git-dir="${ghostty_mirror_path}" cat-file -t "${ghostty_mirror_commit}" >/dev/null 2>&1; then
-    return
-  fi
-
-  echo "info: cloning ghostty upstream mirror (one-time; needs proxy on 127.0.0.1:7890)"
-  rm -rf "${ghostty_mirror_path}"
-  git \
-    -c http.proxy=http://127.0.0.1:7890 \
-    -c https.proxy=http://127.0.0.1:7890 \
-    clone --bare --single-branch --no-tags \
-    https://github.com/ghostty-org/ghostty.git \
-    "${ghostty_mirror_path}"
-
-  if ! git --git-dir="${ghostty_mirror_path}" cat-file -t "${ghostty_mirror_commit}" >/dev/null 2>&1; then
-    echo "error: ghostty mirror is missing commit ${ghostty_mirror_commit}" >&2
-    exit 1
-  fi
-}
-
-ensure_git_http_server() {
-  if curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${git_http_port}/" 2>/dev/null; then
-    return
-  fi
-  GIT_PROJECT_ROOT="${srcroot}/.build" \
-    python3 "${git_http_script}" "${git_http_port}" >"${zmx_build_root}/git-http-server.log" 2>&1 &
-  git_http_server_pid=$!
-  for _ in $(seq 1 50); do
-    if curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:${git_http_port}/" 2>/dev/null; then
-      return
-    fi
-    sleep 0.1
-  done
-  echo "error: git http server failed to start (see ${zmx_build_root}/git-http-server.log)" >&2
-  exit 1
-}
-
-apply_zmx_patch() {
-  (
-    cd "${zmx_dir}"
-    if ! git apply --check "${zmx_patch_path}" 2>/dev/null; then
-      git apply "${zmx_patch_path}"
-    fi
-  )
-}
-
-revert_zmx_patch() {
-  (
-    cd "${zmx_dir}"
-    if git apply --reverse --check "${zmx_patch_path}" 2>/dev/null; then
-      git apply --reverse "${zmx_patch_path}"
-    fi
-  )
-}
-
-cleanup() {
-  revert_zmx_patch 2>/dev/null || true
-  if [ -n "${git_http_server_pid}" ]; then
-    kill "${git_http_server_pid}" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 ensure_zmx_checkout() {
   if [ -f "${zmx_dir}/build.zig" ]; then
@@ -135,7 +61,90 @@ ensure_zmx_checkout() {
   fi
 }
 
+# Apply our out-of-tree patches to the submodule working tree. Idempotent: a
+# patch that already applies in reverse is treated as present. Fails loudly if
+# a patch no longer applies (e.g. after an upstream bump) so it's never silently
+# skipped. The submodule's committed SHA is untouched; `revert_zmx_patches`
+# restores a pristine working tree on exit.
+# Repo-relative paths a patch touches. Parses the patch itself, not the tree, so
+# it works even when the working tree is dirty.
+zmx_patch_files() {
+  git -C "${zmx_dir}" apply --numstat "$1" 2>/dev/null | awk '{ print $3 }'
+}
+
+# Reset just the files a patch touches back to the pinned SHA. Reads the file
+# list line by line (bash 3.2 compatible) so a path with spaces stays intact.
+reset_zmx_patch_files() {
+  local f
+  local files=()
+  while IFS= read -r f; do
+    [ -n "${f}" ] && files+=("${f}")
+  done < <(zmx_patch_files "$1")
+  [ "${#files[@]}" -eq 0 ] || git -C "${zmx_dir}" checkout -- "${files[@]}" 2>/dev/null || true
+}
+
+apply_zmx_patches() {
+  [ -d "${zmx_patches_dir}" ] || return 0
+  local patch
+  for patch in "${zmx_patches_dir}"/*.patch; do
+    [ -e "${patch}" ] || continue
+    if git -C "${zmx_dir}" apply --reverse --check "${patch}" 2>/dev/null; then
+      continue # already fully applied.
+    fi
+    if ! git -C "${zmx_dir}" apply --check "${patch}" 2>/dev/null; then
+      # Neither pristine nor cleanly applied: most likely a prior build was killed
+      # (SIGKILL / power loss) mid-apply and left the patched files dirty. Reset
+      # just those files to the pinned SHA and retry before blaming an upstream bump.
+      reset_zmx_patch_files "${patch}"
+      if ! git -C "${zmx_dir}" apply --check "${patch}" 2>/dev/null; then
+        echo "error: ${patch} does not apply cleanly to ${zmx_submodule_path}." >&2
+        echo "       The submodule may have been bumped (refresh the patch), or a" >&2
+        echo "       previous build left it dirty: git -C ${zmx_submodule_path} checkout . && retry." >&2
+        exit 1
+      fi
+    fi
+    git -C "${zmx_dir}" apply "${patch}"
+  done
+}
+
+revert_zmx_patches() {
+  [ -d "${zmx_patches_dir}" ] || return 0
+  local patch
+  for patch in "${zmx_patches_dir}"/*.patch; do
+    [ -e "${patch}" ] || continue
+    # Prefer a clean reverse-apply; fall back to resetting just the patched files.
+    # The fallback also guards against `set -e` aborting the trap mid-revert if the
+    # reverse-apply fails (e.g. a partially-applied tree).
+    if git -C "${zmx_dir}" apply --reverse --check "${patch}" 2>/dev/null; then
+      git -C "${zmx_dir}" apply --reverse "${patch}" 2>/dev/null || reset_zmx_patch_files "${patch}"
+    else
+      reset_zmx_patch_files "${patch}"
+    fi
+  done
+}
+
 ensure_zmx_checkout
+
+# Patch the pinned submodule in place for this build only, restoring it on exit
+# so `git status` stays clean and the pin is never disturbed. Applied before the
+# fingerprint so patched source is reflected in the rebuild trigger.
+#
+# Revert on signals too (not just EXIT): a cancelled Xcode build or Ctrl-C sends
+# SIGINT/SIGTERM, which would otherwise skip the EXIT trap and leave the tree
+# patched (dirty status + poisoned fingerprint). On signal we revert, clear the
+# traps to avoid a double revert, and exit with the conventional 128+signal code.
+revert_and_signal_exit() {
+  revert_zmx_patches
+  trap - EXIT INT TERM
+  case "$1" in
+    TERM) exit 143 ;;
+    *) exit 130 ;;
+  esac
+}
+trap revert_zmx_patches EXIT
+trap 'revert_and_signal_exit INT' INT
+trap 'revert_and_signal_exit TERM' TERM
+apply_zmx_patches
 
 if [ "${1:-}" = "--print-fingerprint" ]; then
   print_fingerprint
@@ -155,16 +164,12 @@ fi
 
 cd "${zmx_dir}"
 
-ensure_ghostty_mirror
-ensure_git_http_server
-apply_zmx_patch
-
 slice_paths=()
 for target in "${zmx_targets[@]}"; do
   slice_prefix="${zmx_build_root}/slices/${target}"
   slice_cache="${slice_prefix}/.zig-cache"
   slice_binary="${slice_prefix}/bin/zmx"
-  mise exec zig@"${zmx_zig_version}" -- zig build \
+  mise exec -- zig build \
     -Doptimize=ReleaseSafe \
     -Dtarget="${target}" \
     --prefix "${slice_prefix}" \

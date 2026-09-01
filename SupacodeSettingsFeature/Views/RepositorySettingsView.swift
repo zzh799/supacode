@@ -51,7 +51,7 @@ public struct RepositorySettingsView: View {
           Text("Copy ignored files to new worktrees")
           Text("Copies gitignored files from the main worktree.")
         }
-        .disabled(store.isBareRepository)
+        .disabled(store.isBareRepository || store.host != nil)
         Picker(selection: settings.copyUntrackedOnWorktreeCreate) {
           Text("Global \(Text(store.globalCopyUntrackedOnWorktreeCreate ? "Yes" : "No").foregroundStyle(.secondary))")
             .tag(Bool?.none)
@@ -61,10 +61,14 @@ public struct RepositorySettingsView: View {
           Text("Copy untracked files to new worktrees")
           Text("Copies untracked files from the main worktree.")
         }
-        .disabled(store.isBareRepository)
+        .disabled(store.isBareRepository || store.host != nil)
         if store.isBareRepository {
           Text("Copy flags are ignored for bare repositories.")
-            .font(.footnote)
+            .appFont(.footnote)
+            .foregroundStyle(.tertiary)
+        } else if store.host != nil {
+          Text("Copying is available for local repositories only.")
+            .appFont(.footnote)
             .foregroundStyle(.tertiary)
         }
         TextField(
@@ -85,7 +89,18 @@ public struct RepositorySettingsView: View {
       } footer: {
         Text("e.g., `\(exampleWorktreePath)`")
       }
-      Section("Pull Requests") {
+      Section("Git Forge") {
+        Picker(selection: settings.forgeID) {
+          Text("Automatic").tag(String?.none)
+          Text("GitHub").tag(String?.some("github"))
+          Text("GitLab").tag(String?.some("gitlab"))
+          Text("None").tag(String?.some("none"))
+        } label: {
+          Text("Forge")
+          Text("Forge used for pull request data and actions.")
+        }
+      }
+      Section {
         Picker(selection: settings.pullRequestMergeStrategy) {
           Text("Global \(Text(store.globalPullRequestMergeStrategy.title).foregroundStyle(.secondary))")
             .tag(PullRequestMergeStrategy?.none)
@@ -97,6 +112,21 @@ public struct RepositorySettingsView: View {
           Text("Merge strategy")
           Text("Used when merging PRs from the command palette.")
         }
+        Picker(selection: settings.mergedWorktreeAction) {
+          Text("Global \(Text(store.globalMergedWorktreeAction.title).foregroundStyle(.secondary))")
+            .tag(MergedWorktreeAction?.none)
+          ForEach(MergedWorktreeAction.allCases) { action in
+            Text(action.title)
+              .tag(MergedWorktreeAction?.some(action))
+          }
+        } label: {
+          Text("When a pull request is merged")
+          Text("Archive or delete a worktree when its pull request is merged.")
+        }
+      } header: {
+        Text("Pull Requests")
+      } footer: {
+        Text("Worktree merge actions only affect pre-existing local worktrees.")
       }
       Section("Environment Variables") {
         ScriptEnvironmentRow(

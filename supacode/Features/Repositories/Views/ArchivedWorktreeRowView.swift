@@ -4,7 +4,7 @@ import SwiftUI
 
 struct ArchivedWorktreeRowView: View {
   let worktree: Worktree
-  let pullRequest: GithubPullRequest?
+  let pullRequest: ForgePullRequest?
   let customTitle: String?
   let customTint: RepositoryColor?
   let onUnarchive: () -> Void
@@ -28,7 +28,7 @@ struct ArchivedWorktreeRowView: View {
     VStack(alignment: .leading, spacing: 2) {
       HStack(alignment: .firstTextBaseline, spacing: 8) {
         Image(systemName: "archivebox")
-          .font(.caption)
+          .appFont(.caption)
           .foregroundStyle(.secondary)
           .accessibilityHidden(true)
           .frame(width: 16, height: 16)
@@ -36,7 +36,7 @@ struct ArchivedWorktreeRowView: View {
             bodyFontAscender
           }
         let titleText = Text(displayName)
-          .font(.body)
+          .appFont(.body)
           .lineLimit(1)
         if let customTint, backgroundProminence != .increased {
           titleText.foregroundStyle(customTint.color)
@@ -71,7 +71,7 @@ struct ArchivedWorktreeRowView: View {
         Spacer(minLength: 0)
         WorktreePullRequestAccessoryView(display: display)
       }
-      .font(.caption)
+      .appFont(.caption)
       .lineLimit(1)
       .frame(minHeight: 14)
       .padding(.leading, 24)

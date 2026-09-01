@@ -13,6 +13,8 @@ struct WorktreeFilesInspectorView: View {
   /// The toolbar's resolved editor, naming the default Open action.
   let resolvedOpenAction: OpenWorktreeAction?
   let onOpenFile: (URL, OpenWorktreeAction?) -> Void
+  /// Primary open (double-click): runs the open-file script or the system default app.
+  let onActivateFile: (URL) -> Void
   @State private var bottomBarInset: CGFloat = 0
 
   var body: some View {
@@ -21,6 +23,7 @@ struct WorktreeFilesInspectorView: View {
       fileOpenActions: fileOpenActions,
       resolvedOpenAction: resolvedOpenAction,
       onOpenFile: onOpenFile,
+      onActivateFile: onActivateFile,
       bottomBarInset: bottomBarInset
     )
     .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -36,13 +39,14 @@ struct WorktreeFilesInspectorView: View {
 
 private struct FileExplorerPaneFooter: View {
   let root: URL?
+  @Shared(.settingsFile) private var settingsFile
 
   var body: some View {
     // Only the breadcrumb, and only when there's a root: no root means the pane
     // is showing an unavailable state, which gets no footer bar.
     if let root {
       HStack {
-        FileExplorerRootPathControl(url: root)
+        FileExplorerRootPathControl(url: root, chromeTextSize: settingsFile.global.chromeTextSize)
         Spacer(minLength: 0)
       }
       .padding(.horizontal)
@@ -57,6 +61,7 @@ private struct FileExplorerPaneFooter: View {
 /// component in Finder.
 private struct FileExplorerRootPathControl: NSViewRepresentable {
   let url: URL
+  let chromeTextSize: ChromeTextSize
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -66,7 +71,7 @@ private struct FileExplorerRootPathControl: NSViewRepresentable {
     control.isEditable = false
     control.focusRingType = .none
     control.backgroundColor = .clear
-    control.font = .preferredFont(forTextStyle: .callout)
+    control.font = FileExplorerCellFont.scaled(.callout, chromeTextSize)
     control.target = context.coordinator
     control.action = #selector(Coordinator.reveal(_:))
     // Let the breadcrumb elide rather than force the pane wider.
@@ -77,6 +82,7 @@ private struct FileExplorerRootPathControl: NSViewRepresentable {
 
   func updateNSView(_ control: NSPathControl, context: Context) {
     control.url = url
+    control.font = FileExplorerCellFont.scaled(.callout, chromeTextSize)
     control.toolTip = (url.path(percentEncoded: false) as NSString).abbreviatingWithTildeInPath
   }
 
@@ -97,6 +103,7 @@ private struct FileExplorerPaneContent: View {
   let fileOpenActions: [OpenWorktreeAction]
   let resolvedOpenAction: OpenWorktreeAction?
   let onOpenFile: (URL, OpenWorktreeAction?) -> Void
+  let onActivateFile: (URL) -> Void
   let bottomBarInset: CGFloat
 
   var body: some View {
@@ -118,6 +125,7 @@ private struct FileExplorerPaneContent: View {
           fileOpenActions: fileOpenActions,
           resolvedOpenAction: resolvedOpenAction,
           onOpenFile: onOpenFile,
+          onActivateFile: onActivateFile,
           bottomBarInset: bottomBarInset
         )
       }
@@ -135,9 +143,11 @@ private struct FileExplorerTreeContent: View {
   let fileOpenActions: [OpenWorktreeAction]
   let resolvedOpenAction: OpenWorktreeAction?
   let onOpenFile: (URL, OpenWorktreeAction?) -> Void
+  let onActivateFile: (URL) -> Void
   let bottomBarInset: CGFloat
   @State private var quickLookURL: URL?
   @Environment(OpenActionIconStore.self) private var iconStore: OpenActionIconStore?
+  @Shared(.settingsFile) private var settingsFile
 
   var body: some View {
     Group {
@@ -150,6 +160,7 @@ private struct FileExplorerTreeContent: View {
           actions: FileExplorerOutlineActions(
             toggleDirectory: { store.send(.directoryToggled($0)) },
             select: { store.send(.rowSelected($0)) },
+            activateFile: onActivateFile,
             openFile: onOpenFile,
             showMore: { store.send(.showMoreTapped(directory: $0)) },
             quickLook: { quickLookURL = $0 },
@@ -163,6 +174,7 @@ private struct FileExplorerTreeContent: View {
             createItem: { store.send(.createItemRequested(directory: $0, isDirectory: $1)) },
             consumePendingRename: { store.send(.pendingRenameConsumed) }
           ),
+          chromeTextSize: settingsFile.global.chromeTextSize,
           bottomBarInset: bottomBarInset
         )
         // The outline draws under the toolbar (top) and breadcrumb bar (bottom).

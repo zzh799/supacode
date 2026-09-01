@@ -41,7 +41,7 @@ struct SidebarCard<Header: View, Content: View>: View {
             onDismiss()
           } label: {
             Image(systemName: "xmark")
-              .font(.caption2)
+              .appFont(.caption2)
               .foregroundStyle(.secondary)
               .frame(width: 18, height: 18)
               .contentShape(.rect)
@@ -78,11 +78,11 @@ struct SidebarCardLabel: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(title)
-        .font(.subheadline)
+        .appFont(.subheadline)
         .fontWeight(.semibold)
       if let description {
         Text(description)
-          .font(.caption)
+          .appFont(.caption)
           .foregroundStyle(.secondary)
       }
     }

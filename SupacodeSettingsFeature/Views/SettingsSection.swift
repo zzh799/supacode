@@ -2,12 +2,13 @@ import Foundation
 
 public enum SettingsSection: Hashable {
   case general
+  case terminal
   case notifications
   case worktree
   case developer
   case shortcuts
   case updates
-  case github
+  case forges
   case scripts
   case repository(String)
   case repositoryScripts(String)

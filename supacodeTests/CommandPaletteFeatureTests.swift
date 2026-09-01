@@ -75,23 +75,40 @@ struct CommandPaletteFeatureTests {
       from: state,
       ghosttyCommands: [
         GhosttyCommand(
+          title: "Reload Configuration",
+          description: "Reload the configuration file.",
+          action: "reload_config",
+          actionKey: "reload_config"
+        ),
+        // Topology entries are replaced by the app's own layout commands.
+        GhosttyCommand(
           title: "Focus Split Right",
           description: "Focus the split to the right.",
           action: "goto_split:right",
           actionKey: "goto_split"
-        )
+        ),
       ]
     )
 
     let ghosttyItem = items.first {
       if case .ghosttyCommand(let action) = $0.kind {
+        return action == "reload_config"
+      }
+      return false
+    }
+    #expect(ghosttyItem?.title == "Reload Configuration")
+    #expect(ghosttyItem?.subtitle == "Reload the configuration file.")
+
+    let topologyItem = items.first {
+      if case .ghosttyCommand(let action) = $0.kind {
         return action == "goto_split:right"
       }
       return false
     }
+    #expect(topologyItem == nil)
 
-    #expect(ghosttyItem?.title == "Focus Split Right")
-    #expect(ghosttyItem?.subtitle == "Focus the split to the right.")
+    let splitItem = items.first { $0.kind == .layoutCommand(.splitRight) }
+    #expect(splitItem?.title == "Split Right")
   }
 
   @Test func commandPaletteItems_includesRenameBranchOnlyForSelectedWorktree() {
@@ -757,7 +774,7 @@ struct CommandPaletteFeatureTests {
     let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repository])
     state.selection = .worktree(worktree.id)
-    let failingCheck = GithubPullRequestStatusCheck(
+    let failingCheck = ForgePullRequestStatusCheck(
       detailsUrl: "https://example.com/check/1",
       status: "COMPLETED",
       conclusion: "FAILURE",
@@ -778,7 +795,7 @@ struct CommandPaletteFeatureTests {
     let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repository])
     state.selection = .worktree(worktree.id)
-    let failingCheck = GithubPullRequestStatusCheck(
+    let failingCheck = ForgePullRequestStatusCheck(
       status: "COMPLETED",
       conclusion: "FAILURE",
       state: nil
@@ -814,7 +831,7 @@ struct CommandPaletteFeatureTests {
     let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repository])
     state.selection = .worktree(worktree.id)
-    state.setWorktreeInfoForTesting(id: worktree.id, pullRequest: makePullRequest(state: "OPEN"))
+    state.setWorktreeInfoForTesting(id: worktree.id, pullRequest: makePullRequest(state: .open))
 
     let items = CommandPaletteFeature.commandPaletteItems(from: state)
     let closeItem = items.first(where: { $0.title == "Close PR" })
@@ -833,7 +850,7 @@ struct CommandPaletteFeatureTests {
     let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repository])
     state.selection = .worktree(worktree.id)
-    state.setWorktreeInfoForTesting(id: worktree.id, pullRequest: makePullRequest(state: "MERGED"))
+    state.setWorktreeInfoForTesting(id: worktree.id, pullRequest: makePullRequest(state: .merged))
 
     let items = CommandPaletteFeature.commandPaletteItems(from: state)
     #expect(!items.contains(where: { $0.title == "Close PR" }))
@@ -845,13 +862,29 @@ struct CommandPaletteFeatureTests {
     let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repository])
     state.selection = .worktree(worktree.id)
+    let failingCheck = ForgePullRequestStatusCheck(status: "COMPLETED", conclusion: "FAILURE", state: nil)
+    state.setWorktreeInfoForTesting(
+      id: worktree.id,
+      pullRequest: makePullRequest(mergeable: "MERGEABLE", checks: [failingCheck])
+    )
+
+    let items = CommandPaletteFeature.commandPaletteItems(from: state)
+    #expect(!items.contains(where: { $0.title == "Merge PR" }))
+  }
+
+  @Test func commandPaletteShowsMergeActionWhileMergeabilityIsChecking() {
+    let rootPath = "/tmp/repo"
+    let worktree = makeWorktree(id: "\(rootPath)/wt-checking", name: "checking", repoRoot: rootPath)
+    let repository = makeRepository(rootPath: rootPath, name: "Repo", worktrees: [worktree])
+    var state = RepositoriesFeature.State(reconciledRepositories: [repository])
+    state.selection = .worktree(worktree.id)
     state.setWorktreeInfoForTesting(
       id: worktree.id,
       pullRequest: makePullRequest(mergeable: "UNKNOWN", mergeStateStatus: "BLOCKED")
     )
 
     let items = CommandPaletteFeature.commandPaletteItems(from: state)
-    #expect(!items.contains(where: { $0.title == "Merge PR" }))
+    #expect(items.contains(where: { $0.title == "Merge PR" }))
   }
 
   @Test func recencyBreaksFuzzyTiesWithinGroup() {
@@ -1709,7 +1742,8 @@ struct CommandPaletteFeatureTests {
       isGitRepository: false
     )
     var state = RepositoriesFeature.State(reconciledRepositories: [folderRepo])
-    // A folder's custom name / color live on the sidebar section.
+    // Only a legacy section value is set here; with no per-row title it still
+    // surfaces as the folder's name and tint.
     state.$sidebar.withLock { sidebar in
       var section = sidebar.sections[folderRepo.id] ?? .init()
       section.title = "Design Docs"
@@ -1727,12 +1761,41 @@ struct CommandPaletteFeatureTests {
     #expect(item?.worktreeStyle?.icon == .folder)
   }
 
+  @Test func worktreeSwitcherItems_folderRowTitleWinsOverStaleSection() {
+    let folderURL = URL(fileURLWithPath: "/tmp/flip-folder")
+    let folderID = Repository.folderWorktreeID(for: folderURL)
+    let folderRepo = Repository(
+      id: RepositoryID(folderURL.path(percentEncoded: false)),
+      rootURL: folderURL,
+      name: "flip-folder",
+      worktrees: IdentifiedArray(uniqueElements: [
+        Worktree(
+          id: folderID, name: "flip-folder", detail: "", workingDirectory: folderURL, repositoryRootURL: folderURL)
+      ]),
+      isGitRepository: false
+    )
+    var state = RepositoriesFeature.State(reconciledRepositories: [folderRepo])
+    // The loaded folder row reads the per-row title, so it must win over a
+    // stale section value left behind by a git-to-folder kind flip.
+    state.$sidebar.withLock { sidebar in
+      var section = sidebar.sections[folderRepo.id] ?? .init()
+      section.title = "Stale Section"
+      sidebar.sections[folderRepo.id] = section
+    }
+    state.sidebarItems[id: folderID]?.customTitle = "Live Row"
+
+    let item = CommandPaletteFeature.worktreeSwitcherItems(from: state).first
+    // Guard that this stays on the folder branch, where the precedence lives.
+    #expect(item?.worktreeStyle?.icon == .folder)
+    #expect(item?.title == "Live Row")
+  }
+
   @Test func worktreeSwitcherItems_iconMissingWinsOverPullRequest() {
     let worktree = makeWorktree(id: "/tmp/repo/wt", name: "feature", repoRoot: "/tmp/repo")
     let repo = makeRepository(rootPath: "/tmp/repo", name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repo])
     state.sidebarItems[id: worktree.id]?.isMissing = true
-    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: "OPEN")
+    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: .open)
 
     let item = CommandPaletteFeature.worktreeSwitcherItems(from: state).first
     // A missing working directory wins over the pull-request glyph.
@@ -1745,13 +1808,13 @@ struct CommandPaletteFeatureTests {
     var state = RepositoriesFeature.State(reconciledRepositories: [repo])
     // The row moved to a branch that no longer matches the PR head ("feature").
     state.sidebarItems[id: worktree.id]?.branchName = "moved-off"
-    let failingCheck = GithubPullRequestStatusCheck(
+    let failingCheck = ForgePullRequestStatusCheck(
       detailsUrl: "https://example.com/check/1",
       status: "COMPLETED",
       conclusion: "FAILURE",
       state: nil
     )
-    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: "OPEN", checks: [failingCheck])
+    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: .open, checks: [failingCheck])
 
     let item = CommandPaletteFeature.worktreeSwitcherItems(from: state).first
     // A stale PR (head branch != row branch) collapses to the branch glyph and drops the badge.
@@ -1764,8 +1827,8 @@ struct CommandPaletteFeatureTests {
 
     var passingState = RepositoriesFeature.State(reconciledRepositories: [repo])
     passingState.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(
-      state: "OPEN",
-      checks: [GithubPullRequestStatusCheck(status: "COMPLETED", conclusion: "SUCCESS", state: nil)]
+      state: .open,
+      checks: [ForgePullRequestStatusCheck(status: "COMPLETED", conclusion: "SUCCESS", state: nil)]
     )
     #expect(
       CommandPaletteFeature.worktreeSwitcherItems(from: passingState).first?.worktreeStyle?.icon
@@ -1773,8 +1836,8 @@ struct CommandPaletteFeatureTests {
 
     var inProgressState = RepositoriesFeature.State(reconciledRepositories: [repo])
     inProgressState.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(
-      state: "OPEN",
-      checks: [GithubPullRequestStatusCheck(status: "IN_PROGRESS", conclusion: nil, state: nil)]
+      state: .open,
+      checks: [ForgePullRequestStatusCheck(status: "IN_PROGRESS", conclusion: nil, state: nil)]
     )
     #expect(
       CommandPaletteFeature.worktreeSwitcherItems(from: inProgressState).first?.worktreeStyle?.icon
@@ -1785,7 +1848,7 @@ struct CommandPaletteFeatureTests {
     let worktree = makeWorktree(id: "/tmp/repo/wt", name: "feature", repoRoot: "/tmp/repo")
     let repo = makeRepository(rootPath: "/tmp/repo", name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repo])
-    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: "OPEN")
+    state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(state: .open)
 
     let item = CommandPaletteFeature.worktreeSwitcherItems(from: state).first
     // An open pull request with no checks lifts the branch glyph to the open-PR
@@ -1797,14 +1860,14 @@ struct CommandPaletteFeatureTests {
     let worktree = makeWorktree(id: "/tmp/repo/wt", name: "feature", repoRoot: "/tmp/repo")
     let repo = makeRepository(rootPath: "/tmp/repo", name: "Repo", worktrees: [worktree])
     var state = RepositoriesFeature.State(reconciledRepositories: [repo])
-    let failingCheck = GithubPullRequestStatusCheck(
+    let failingCheck = ForgePullRequestStatusCheck(
       detailsUrl: "https://example.com/check/1",
       status: "COMPLETED",
       conclusion: "FAILURE",
       state: nil
     )
     state.sidebarItems[id: worktree.id]?.pullRequest = makePullRequest(
-      state: "OPEN",
+      state: .open,
       checks: [failingCheck]
     )
 
@@ -1910,14 +1973,14 @@ private func makeRepository(
 }
 
 private func makePullRequest(
-  state: String = "OPEN",
+  state: PullRequestState = .open,
   isDraft: Bool = false,
   reviewDecision: String? = nil,
   mergeable: String? = nil,
   mergeStateStatus: String? = nil,
-  checks: [GithubPullRequestStatusCheck] = []
-) -> GithubPullRequest {
-  GithubPullRequest(
+  checks: [ForgePullRequestStatusCheck] = []
+) -> ForgePullRequest {
+  ForgePullRequest(
     number: 1,
     title: "PR",
     state: state,
@@ -1928,12 +1991,13 @@ private func makePullRequest(
     mergeable: mergeable,
     mergeStateStatus: mergeStateStatus,
     updatedAt: nil,
+    mergedAt: nil,
     url: "https://example.com/pull/1",
     headRefName: "feature",
     baseRefName: "main",
     commitsCount: 1,
     authorLogin: "khoi",
-    statusCheckRollup: checks.isEmpty ? nil : GithubPullRequestStatusCheckRollup(checks: checks),
+    statusCheckRollup: checks.isEmpty ? nil : ForgePullRequestStatusCheckRollup(checks: checks),
     mergeQueueEntry: nil
   )
 }

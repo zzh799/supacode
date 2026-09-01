@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 
 private let surfaceLogger = SupaLogger("Surface")
 
+// Terminal content follows the pointer under layout-level focus-follows-mouse.
+extension GhosttySurfaceView: HoverFocusEligibleResponder {}
+
 final class GhosttySurfaceView: NSView, Identifiable {
   private struct ScrollbarState {
     let total: UInt64
@@ -35,7 +38,6 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
-  @MainActor
   private final class CachedValue<T> {
     private var value: T?
     private let fetch: () -> T
@@ -59,7 +61,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
       let fetched = fetch()
       value = fetched
       expiryTask?.cancel()
-      expiryTask = Task { @MainActor [weak self] in
+      expiryTask = Task { [weak self] in
         guard let self else { return }
         try? await ContinuousClock().sleep(for: self.duration)
         guard !Task.isCancelled else { return }
@@ -87,9 +89,17 @@ final class GhosttySurfaceView: NSView, Identifiable {
   /// sequences and must not have Ghostty's integration injected.
   private let disableShellIntegration: Bool
   private let fontSize: Float32
+  // Display scale carried from creation-time geometry, authoritative until the
+  // view joins a window.
+  private let initialScale: CGFloat
+  // The scale last pushed to the terminal core; the frozen grid must record
+  // this one, since the applied backing size was measured under it.
+  private var appliedContentScale: CGFloat
   private let context: ghostty_surface_context_e
   private var trackingArea: NSTrackingArea?
-  private var lastBackingSize: CGSize = .zero
+  // Only ever holds sizes actually pushed to ghostty_surface_set_size; a rejected
+  // degenerate size must be re-evaluated on the next layout pass.
+  private var lastAppliedBackingSize: CGSize = .zero
   private var lastPerformKeyEvent: TimeInterval?
   private var currentCursor: NSCursor = .iBeam
   private var focused = false
@@ -136,6 +146,20 @@ final class GhosttySurfaceView: NSView, Identifiable {
       }
     }
   }
+  // Strong hold forms a surface<->wrapper cycle, so `closeSurface` must release
+  // it; `deinit` cannot free the surface until it has.
+  private var ownedScrollWrapper: GhosttySurfaceScrollView?
+
+  /// The view a content host mounts for this surface: its scroll wrapper, built
+  /// once and reused across remounts so a rebuild or worktree switch reparents
+  /// it and the live surface keeps its painted frames, instead of rebuilding at
+  /// zero size.
+  func hostedView() -> GhosttySurfaceScrollView {
+    if let ownedScrollWrapper { return ownedScrollWrapper }
+    let wrapper = GhosttySurfaceScrollView(surfaceView: self)
+    ownedScrollWrapper = wrapper
+    return wrapper
+  }
   var onFocusChange: ((Bool) -> Void)?
   /// Asks the owning state to re-derive activity because user input reached an
   /// occluded surface, passing the window's fresh key/visibility readings so
@@ -156,10 +180,6 @@ final class GhosttySurfaceView: NSView, Identifiable {
   /// keeps the queue at most one deep without changing correctness (each Task
   /// is already idempotent on its own guards).
   private var pendingFocusClaim: Task<Void, Never>?
-  /// Set when a re-attach to a window owes the surface one repaint. Cleared by
-  /// `flushReattachRepaint`, so a re-attach draws at most one extra frame no
-  /// matter how many of the layout/async paths race to fulfil it.
-  private var needsRepaintAfterReattach = false
 
   private var accessibilityPaneIndexHelp: String?
 
@@ -225,12 +245,15 @@ final class GhosttySurfaceView: NSView, Identifiable {
     commandWrapper: [String] = [],
     disableShellIntegration: Bool = false,
     fontSize: Float32? = nil,
+    initialGeometry: ContentGeometry,
     context: ghostty_surface_context_e
   ) {
     self.id = id
     self.runtime = runtime
     self.bridge = GhosttySurfaceBridge()
     self.fontSize = fontSize ?? 0
+    self.initialScale = initialGeometry.scale
+    self.appliedContentScale = initialGeometry.scale
     self.context = context
     self.environmentVariables = environmentVariables
     self.commandWrapper = commandWrapper
@@ -253,7 +276,9 @@ final class GhosttySurfaceView: NSView, Identifiable {
     } else {
       initialInputCString = nil
     }
-    super.init(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+    // Off-window backing conversion is 1x, so a point frame equal to the intended
+    // pixel size makes ghostty_surface_new spawn the PTY at an honest grid (#780).
+    super.init(frame: NSRect(origin: .zero, size: initialGeometry.pixelSize))
     wantsLayer = true
     bridge.surfaceView = self
     createSurface()
@@ -273,42 +298,28 @@ final class GhosttySurfaceView: NSView, Identifiable {
   }
 
   deinit {
-    // Views tear down on the main thread, so hoist the main-actor cleanup
-    // through assumeIsolated. `self` is a @MainActor class, so sending it into
-    // the (assumed) main actor closure is safe.
+    if let eventMonitor {
+      NSEvent.removeMonitor(eventMonitor)
+    }
+    clearNotificationObservers()
+    let id = ObjectIdentifier(self)
     MainActor.assumeIsolated {
-      if let eventMonitor {
-        NSEvent.removeMonitor(eventMonitor)
-      }
-      // Inlined clearNotificationObservers(); it is main-actor isolated.
-      let center = NotificationCenter.default
-      for observer in notificationObservers {
-        center.removeObserver(observer)
-      }
-      notificationObservers.removeAll()
-      let id = ObjectIdentifier(self)
       SecureInput.shared.removeScoped(id)
-      // Inlined closeSurface(); views tear down on the main thread.
-      if let surface {
-        if let surfaceRef {
-          runtime.unregisterSurface(surfaceRef)
-        }
-        self.surfaceRef = nil
-        ghostty_surface_free(surface)
-        self.surface = nil
-        bridge.surface = nil
-        lastOcclusion = nil
-        lastSurfaceFocus = nil
-      }
-      if let workingDirectoryCString {
-        free(workingDirectoryCString)
-      }
-      if let commandCString {
-        free(commandCString)
-      }
-      if let initialInputCString {
-        free(initialInputCString)
-      }
+    }
+    // A live surface here means a teardown path bypassed `closeSurface`; the
+    // call below still frees it, off the turn.
+    if surface != nil {
+      assertionFailure("GhosttySurfaceView deallocated with a live surface; a teardown path bypassed closeSurface().")
+    }
+    closeSurface()
+    if let workingDirectoryCString {
+      free(workingDirectoryCString)
+    }
+    if let commandCString {
+      free(commandCString)
+    }
+    if let initialInputCString {
+      free(initialInputCString)
     }
   }
 
@@ -319,16 +330,36 @@ final class GhosttySurfaceView: NSView, Identifiable {
 
   func closeSurface() {
     clearNotificationObservers()
-    if let surface {
-      if let surfaceRef {
-        runtime.unregisterSurface(surfaceRef)
-        self.surfaceRef = nil
-      }
+    // Break the surface<->wrapper cycle; the strong hold otherwise blocks deinit.
+    defer { ownedScrollWrapper = nil }
+    guard let surface else { return }
+    if let surfaceRef {
+      runtime.unregisterSurface(surfaceRef)
+      self.surfaceRef = nil
+    }
+    self.surface = nil
+    bridge.surface = nil
+    lastOcclusion = nil
+    lastSurfaceFocus = nil
+    // Hide before the free so the "[Process exited]" overlay can't paint while
+    // the layout collapses around the closing pane.
+    isHidden = true
+    // Free off the current turn on the main queue: `ghostty_surface_free` joins
+    // the surface's search, renderer, and IO threads and tears down the Metal
+    // renderer, which would otherwise block the reducer turn. The main queue,
+    // not a `Task`, runs the free outside the reducer's inherited task-local
+    // scope, where an isolated-deinit release it triggers can abort as an
+    // invalid free. Retain the runtime and bridge by hand across the free (a
+    // Sendable block can't capture them) so the Ghostty app stays alive and a
+    // synchronous callback during the free still resolves a live bridge; `self`
+    // is intentionally not captured, as the free never touches the surface's
+    // nsview.
+    let retainedRuntime = Unmanaged.passRetained(runtime)
+    let retainedBridge = Unmanaged.passRetained(bridge)
+    DispatchQueue.main.async {
       ghostty_surface_free(surface)
-      self.surface = nil
-      bridge.surface = nil
-      lastOcclusion = nil
-      lastSurfaceFocus = nil
+      retainedBridge.release()
+      retainedRuntime.release()
     }
   }
 
@@ -446,23 +477,18 @@ final class GhosttySurfaceView: NSView, Identifiable {
         // Only reclaim from the no-owner or sibling-terminal case. Stealing
         // from a non-terminal responder (command palette, inline rename text
         // field) mid-rebuild would yank focus from whatever the user is
-        // actively typing into.
+        // actively typing into. The window itself is the no-owner case: AppKit
+        // parks firstResponder there when the previous owner leaves the
+        // hierarchy, e.g. after a split collapse.
         let responder = window.firstResponder
         guard responder !== self else { return }
-        if responder == nil || responder is GhosttySurfaceView {
+        if responder == nil || responder === window || responder is GhosttySurfaceView {
           _ = window.makeFirstResponder(self)
         }
       }
     }
     if window != nil {
-      // Only a re-attach (never the first mount) needs the forced repaint; the
-      // first mount already resizes the surface from zero, which paints it.
-      if hasBeenInWindow {
-        scheduleReattachRepaint()
-      }
       hasBeenInWindow = true
-    } else {
-      needsRepaintAfterReattach = false
     }
     updateScreenObservers()
     updateContentScale()
@@ -493,10 +519,6 @@ final class GhosttySurfaceView: NSView, Identifiable {
   override func layout() {
     super.layout()
     notifySizeChanged()
-    // The frame is settled here, so a re-attached surface repaints at its real
-    // size. The async fallback in `scheduleReattachRepaint` covers the case
-    // where AppKit never re-lays-out a view whose size didn't change.
-    flushReattachRepaint()
   }
 
   private func notifySizeChanged() {
@@ -505,42 +527,6 @@ final class GhosttySurfaceView: NSView, Identifiable {
     } else {
       updateSurfaceSize()
     }
-  }
-
-  /// Owes the surface one repaint because it was just re-attached to a window.
-  ///
-  /// A tab switch rebuilds the whole split subtree, so SwiftUI detaches every
-  /// `GhosttySurfaceView` and re-adds it under a brand new scroll view, which
-  /// hands Ghostty a fresh Metal layer with no content in it. The frame is
-  /// identical before and after, so `updateSurfaceSize` short-circuits on
-  /// `lastBackingSize` and Ghostty never sees a size change to react to: the
-  /// pane sits there as bare background until something else forces a frame.
-  /// That is why dragging a split divider appears to "fix" it — the drag is the
-  /// first thing to actually resize the surface.
-  private func scheduleReattachRepaint() {
-    needsRepaintAfterReattach = true
-    needsLayout = true
-    DispatchQueue.main.async { [weak self] in
-      MainActor.assumeIsolated { self?.flushReattachRepaint() }
-    }
-  }
-
-  /// Paints the frame a re-attach owes, at most once per re-attach.
-  func flushReattachRepaint() {
-    guard needsRepaintAfterReattach else { return }
-    needsRepaintAfterReattach = false
-    repaint()
-  }
-
-  /// Draws one frame synchronously on the main thread. Unlike the renderer
-  /// thread's normal path this ignores vsync and visibility gating, which is
-  /// exactly what a re-mounted layer needs.
-  private func repaint() {
-    #if DEBUG
-      recordedRepaints += 1
-    #endif
-    guard let surface else { return }
-    ghostty_surface_draw(surface)
   }
 
   override func updateTrackingAreas() {
@@ -596,7 +582,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     guard surface != nil else { return }
     guard self.focused != focused else { return }
     self.focused = focused
-    if focused {
+    if focused, bridge.state.bellCount != 0 {
       bridge.state.bellCount = 0
     }
     setSurfaceFocus(focused)
@@ -744,7 +730,11 @@ final class GhosttySurfaceView: NSView, Identifiable {
       interpretKeyEvents([event])
       return
     }
-    bridge.state.bellCount = 0
+    // Guarded: an unconditional write invalidates every observer of the bridge
+    // state on every keystroke, key repeat included.
+    if bridge.state.bellCount != 0 {
+      bridge.state.bellCount = 0
+    }
     let (translationEvent, translationMods) = translationState(event, surface: surface)
     let action = event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS
     keyTextAccumulator = []
@@ -1014,22 +1004,48 @@ final class GhosttySurfaceView: NSView, Identifiable {
 
   func updateSurfaceSize(contentSize: CGSize? = nil) {
     guard let surface else { return }
+    // Off-window backing conversion is 1x; re-measuring a detached view would
+    // halve the applied size and poison the hibernation freeze.
+    guard window != nil || !hasBeenInWindow else { return }
     let backingSize = convertToBacking(contentSize ?? bounds.size)
-    if backingSize == lastBackingSize {
-      return
-    }
-    lastBackingSize = backingSize
-    let width = UInt32(max(1, Int(backingSize.width.rounded(.down))))
-    let height = UInt32(max(1, Int(backingSize.height.rounded(.down))))
     let currentSize = ghostty_surface_size(surface)
-    guard currentSize.cell_width_px > 0, currentSize.cell_height_px > 0 else {
-      ghostty_surface_set_size(surface, width, height)
-      return
+    let decision = ResizePolicy.decision(
+      backingSize: backingSize,
+      lastAppliedBackingSize: lastAppliedBackingSize,
+      cellWidth: Int(currentSize.cell_width_px),
+      cellHeight: Int(currentSize.cell_height_px)
+    )
+    guard decision == .apply else { return }
+    lastAppliedBackingSize = backingSize
+    ghostty_surface_set_size(
+      surface,
+      UInt32(max(1, Int(backingSize.width.rounded(.down)))),
+      UInt32(max(1, Int(backingSize.height.rounded(.down))))
+    )
+  }
+
+  enum ResizePolicy {
+    enum Decision: Equatable {
+      case skipUnchanged
+      case apply
+      case rejectDegenerate
     }
-    let columns = Int(width) / Int(currentSize.cell_width_px)
-    let rows = Int(height) / Int(currentSize.cell_height_px)
-    guard columns >= 5, rows >= 2 else { return }
-    ghostty_surface_set_size(surface, width, height)
+
+    // Sizes too small for a usable grid are rejected, not remembered; unknown cell
+    // metrics (pre-first-render) always apply so Ghostty can derive them.
+    static func decision(
+      backingSize: CGSize,
+      lastAppliedBackingSize: CGSize,
+      cellWidth: Int,
+      cellHeight: Int
+    ) -> Decision {
+      guard backingSize != lastAppliedBackingSize else { return .skipUnchanged }
+      guard cellWidth > 0, cellHeight > 0 else { return .apply }
+      let columns = max(1, Int(backingSize.width.rounded(.down))) / cellWidth
+      let rows = max(1, Int(backingSize.height.rounded(.down))) / cellHeight
+      guard columns >= 5, rows >= 2 else { return .rejectDegenerate }
+      return .apply
+    }
   }
 
   func updateCellSize(width: UInt32, height: UInt32) {
@@ -1044,6 +1060,22 @@ final class GhosttySurfaceView: NSView, Identifiable {
 
   func currentCellSize() -> CGSize {
     cellSize
+  }
+
+  /// The grid this surface last actually rendered at, for hibernation freeze;
+  /// nil once the core is gone or while the size is still unknown.
+  func captureFrozenGrid() -> FrozenGrid? {
+    guard let surface else { return nil }
+    let size = ghostty_surface_size(surface)
+    // The stored fontSize is creation-time only; zoom lives in the core.
+    let liveFontSize = ghostty_surface_font_size(surface)
+    return FrozenGrid.from(
+      backingSize: lastAppliedBackingSize,
+      columns: Int(size.columns),
+      rows: Int(size.rows),
+      scale: appliedContentScale,
+      fontSize: liveFontSize == 0 ? nil : liveFontSize
+    )
   }
 
   func shouldShowScrollbar() -> Bool {
@@ -1134,12 +1166,21 @@ final class GhosttySurfaceView: NSView, Identifiable {
     bridge.surface = surface
     lastOcclusion = nil
     lastSurfaceFocus = nil
+    // A new Ghostty surface defaults to focused (solid cursor), but `focused`
+    // starts false, so `focusDidChange(false)` would dedup and never clear it,
+    // leaving every restored pane's cursor solid. Start unfocused to agree with
+    // `focused`; the focus flow sets the truly focused pane solid.
+    setSurfaceFocus(false)
     updateSurfaceSize()
   }
 
   private func updateContentScale() {
     guard let surface else { return }
+    // A detached-but-previously-mounted view has no better scale than the one
+    // already applied; re-pushing the creation scale would churn the renderer.
+    guard window != nil || !hasBeenInWindow else { return }
     let scale = backingScaleFactor()
+    appliedContentScale = scale
     ghostty_surface_set_content_scale(surface, scale, scale)
   }
 
@@ -1147,10 +1188,7 @@ final class GhosttySurfaceView: NSView, Identifiable {
     if let window {
       return window.backingScaleFactor
     }
-    if let screen = NSScreen.main {
-      return screen.backingScaleFactor
-    }
-    return 2.0
+    return initialScale
   }
 
   func setOcclusion(_ visible: Bool) {
@@ -1406,23 +1444,21 @@ final class GhosttySurfaceView: NSView, Identifiable {
     }
   }
 
-  nonisolated override func doCommand(by selector: Selector) {
-    MainActor.assumeIsolated {
-      if let lastPerformKeyEvent,
-        let current = NSApp.currentEvent,
-        lastPerformKeyEvent == current.timestamp
-      {
-        NSApp.sendEvent(current)
-        return
-      }
-      switch selector {
-      case #selector(moveToBeginningOfDocument(_:)):
-        performBindingAction("scroll_to_top")
-      case #selector(moveToEndOfDocument(_:)):
-        performBindingAction("scroll_to_bottom")
-      default:
-        break
-      }
+  override func doCommand(by selector: Selector) {
+    if let lastPerformKeyEvent,
+      let current = NSApp.currentEvent,
+      lastPerformKeyEvent == current.timestamp
+    {
+      NSApp.sendEvent(current)
+      return
+    }
+    switch selector {
+    case #selector(moveToBeginningOfDocument(_:)):
+      performBindingAction("scroll_to_top")
+    case #selector(moveToEndOfDocument(_:)):
+      performBindingAction("scroll_to_bottom")
+    default:
+      break
     }
   }
 
@@ -1690,10 +1726,6 @@ final class GhosttySurfaceView: NSView, Identifiable {
     /// binding was actually invoked (the C surface is nil under xctest).
     var recordedBindingActions: [String] = []
 
-    /// Counts repaint attempts so tests can assert a re-attach schedules
-    /// exactly one, without needing a live Ghostty surface to draw into.
-    var recordedRepaints: Int = 0
-
     /// Read-only responder-focus seam for the #757 activity tests.
     var isFocusedForTesting: Bool { focused }
   #endif
@@ -1928,132 +1960,109 @@ extension GhosttySurfaceView {
 }
 
 extension GhosttySurfaceView: NSTextInputClient {
-  nonisolated func hasMarkedText() -> Bool {
-    MainActor.assumeIsolated { markedText.length > 0 }
+  func hasMarkedText() -> Bool {
+    markedText.length > 0
   }
 
-  nonisolated func markedRange() -> NSRange {
-    MainActor.assumeIsolated {
-      guard markedText.length > 0 else { return NSRange() }
-      return NSRange(location: 0, length: markedText.length)
-    }
+  func markedRange() -> NSRange {
+    guard markedText.length > 0 else { return NSRange() }
+    return NSRange(location: 0, length: markedText.length)
   }
 
-  nonisolated func selectedRange() -> NSRange {
-    MainActor.assumeIsolated {
-      guard let surface else { return NSRange() }
-      var text = ghostty_text_s()
-      guard ghostty_surface_read_selection(surface, &text) else { return NSRange() }
-      defer { ghostty_surface_free_text(surface, &text) }
-      return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
-    }
+  func selectedRange() -> NSRange {
+    guard let surface else { return NSRange() }
+    var text = ghostty_text_s()
+    guard ghostty_surface_read_selection(surface, &text) else { return NSRange() }
+    defer { ghostty_surface_free_text(surface, &text) }
+    return NSRange(location: Int(text.offset_start), length: Int(text.offset_len))
   }
 
-  nonisolated func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-    // Unbox to a Sendable String before crossing into the main actor so the
-    // signature matches NSTextInputClient's non-sending `Any` parameter.
-    let resolved: String
+  func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
     switch string {
     case let attributedText as NSAttributedString:
-      resolved = attributedText.string
+      markedText = NSMutableAttributedString(attributedString: attributedText)
     case let stringValue as String:
-      resolved = stringValue
+      markedText = NSMutableAttributedString(string: stringValue)
     default:
       return
     }
-    MainActor.assumeIsolated {
-      markedText = NSMutableAttributedString(string: resolved)
-      if keyTextAccumulator == nil {
-        syncPreedit()
-      }
+    if keyTextAccumulator == nil {
+      syncPreedit()
     }
   }
 
-  nonisolated func unmarkText() {
-    MainActor.assumeIsolated {
-      if markedText.length > 0 {
-        markedText.mutableString.setString("")
-        syncPreedit()
-      }
+  func unmarkText() {
+    if markedText.length > 0 {
+      markedText.mutableString.setString("")
+      syncPreedit()
     }
   }
 
-  nonisolated func validAttributesForMarkedText() -> [NSAttributedString.Key] {
-    MainActor.assumeIsolated { [] }
+  func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+    []
   }
 
-  nonisolated func attributedSubstring(
+  func attributedSubstring(
     forProposedRange range: NSRange,
     actualRange: NSRangePointer?
   ) -> NSAttributedString? {
-    // assumeIsolated requires a Sendable result; carry the non-Sendable
-    // attributed string out through an unchecked box.
-    final class Box: @unchecked Sendable {
-      var value: NSAttributedString?
+    guard let surface else { return nil }
+    guard range.length > 0 else { return nil }
+    var text = ghostty_text_s()
+    guard ghostty_surface_read_selection(surface, &text) else { return nil }
+    defer { ghostty_surface_free_text(surface, &text) }
+    var attributes: [NSAttributedString.Key: Any] = [:]
+    if let fontRaw = ghostty_surface_quicklook_font(surface) {
+      let font = Unmanaged<CTFont>.fromOpaque(fontRaw)
+      attributes[.font] = font.takeUnretainedValue()
+      font.release()
     }
-    let box = Box()
-    MainActor.assumeIsolated {
-      guard let surface else { return }
-      guard range.length > 0 else { return }
+    return NSAttributedString(string: String(cString: text.text), attributes: attributes)
+  }
+
+  func characterIndex(for point: NSPoint) -> Int {
+    0
+  }
+
+  func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+    guard let surface else {
+      return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
+    }
+    var caretX: Double = 0
+    var caretY: Double = 0
+    var width: Double = cellSize.width
+    var height: Double = cellSize.height
+    if range.length > 0, range != selectedRange() {
       var text = ghostty_text_s()
-      guard ghostty_surface_read_selection(surface, &text) else { return }
-      defer { ghostty_surface_free_text(surface, &text) }
-      var attributes: [NSAttributedString.Key: Any] = [:]
-      if let fontRaw = ghostty_surface_quicklook_font(surface) {
-        let font = Unmanaged<CTFont>.fromOpaque(fontRaw)
-        attributes[.font] = font.takeUnretainedValue()
-        font.release()
-      }
-      box.value = NSAttributedString(string: String(cString: text.text), attributes: attributes)
-    }
-    return box.value
-  }
-
-  nonisolated func characterIndex(for point: NSPoint) -> Int {
-    MainActor.assumeIsolated { 0 }
-  }
-
-  nonisolated func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-    MainActor.assumeIsolated {
-      guard let surface else {
-        return NSRect(x: frame.origin.x, y: frame.origin.y, width: 0, height: 0)
-      }
-      var caretX: Double = 0
-      var caretY: Double = 0
-      var width: Double = cellSize.width
-      var height: Double = cellSize.height
-      if range.length > 0, range != selectedRange() {
-        var text = ghostty_text_s()
-        if ghostty_surface_read_selection(surface, &text) {
-          caretX = text.tl_px_x - 2
-          caretY = text.tl_px_y + 2
-          ghostty_surface_free_text(surface, &text)
-        } else {
-          ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
-        }
+      if ghostty_surface_read_selection(surface, &text) {
+        caretX = text.tl_px_x - 2
+        caretY = text.tl_px_y + 2
+        ghostty_surface_free_text(surface, &text)
       } else {
         ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
       }
-      if range.length == 0, width > 0 {
-        width = 0
-        caretX += cellSize.width * Double(range.location + range.length)
-      }
-      let viewRect = NSRect(
-        x: caretX,
-        y: frame.size.height - caretY,
-        width: width,
-        height: max(height, cellSize.height)
-      )
-      let winRect = convert(viewRect, to: nil)
-      guard let window else { return winRect }
-      return window.convertToScreen(winRect)
+    } else {
+      ghostty_surface_ime_point(surface, &caretX, &caretY, &width, &height)
     }
+    if range.length == 0, width > 0 {
+      width = 0
+      caretX += cellSize.width * Double(range.location + range.length)
+    }
+    let viewRect = NSRect(
+      x: caretX,
+      y: frame.size.height - caretY,
+      width: width,
+      height: max(height, cellSize.height)
+    )
+    let winRect = convert(viewRect, to: nil)
+    guard let window else { return winRect }
+    return window.convertToScreen(winRect)
   }
 
-  nonisolated func insertText(_ string: Any, replacementRange: NSRange) {
-    // Unbox to a Sendable String before crossing into the main actor so the
-    // signature matches NSTextInputClient's non-sending `Any` parameter.
-    let chars: String
+  func insertText(_ string: Any, replacementRange: NSRange) {
+    guard NSApp.currentEvent != nil else { return }
+    guard let surface else { return }
+    var chars = ""
     switch string {
     case let attributedText as NSAttributedString:
       chars = attributedText.string
@@ -2062,20 +2071,16 @@ extension GhosttySurfaceView: NSTextInputClient {
     default:
       return
     }
-    MainActor.assumeIsolated {
-      guard NSApp.currentEvent != nil else { return }
-      guard let surface else { return }
-      unmarkText()
-      if var acc = keyTextAccumulator {
-        acc.append(chars)
-        keyTextAccumulator = acc
-        return
-      }
-      let len = chars.utf8CString.count
-      if len == 0 { return }
-      chars.withCString { ptr in
-        ghostty_surface_text(surface, ptr, UInt(len - 1))
-      }
+    unmarkText()
+    if var acc = keyTextAccumulator {
+      acc.append(chars)
+      keyTextAccumulator = acc
+      return
+    }
+    let len = chars.utf8CString.count
+    if len == 0 { return }
+    chars.withCString { ptr in
+      ghostty_surface_text(surface, ptr, UInt(len - 1))
     }
   }
 }
@@ -2102,16 +2107,14 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     return super.validRequestor(forSendType: sendType, returnType: returnType)
   }
 
-  nonisolated func writeSelection(to pboard: sending NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
-    MainActor.assumeIsolated {
-      guard let surface else { return false }
-      var text = ghostty_text_s()
-      guard ghostty_surface_read_selection(surface, &text) else { return false }
-      defer { ghostty_surface_free_text(surface, &text) }
-      pboard.declareTypes([.string], owner: nil)
-      pboard.setString(String(cString: text.text), forType: .string)
-      return true
-    }
+  func writeSelection(to pboard: NSPasteboard, types: [NSPasteboard.PasteboardType]) -> Bool {
+    guard let surface else { return false }
+    var text = ghostty_text_s()
+    guard ghostty_surface_read_selection(surface, &text) else { return false }
+    defer { ghostty_surface_free_text(surface, &text) }
+    pboard.declareTypes([.string], owner: nil)
+    pboard.setString(String(cString: text.text), forType: .string)
+    return true
   }
 
   /// Sends raw text directly to the terminal PTY, bypassing the text input system.
@@ -2127,20 +2130,18 @@ extension GhosttySurfaceView: NSServicesMenuRequestor {
     }
   }
 
-  nonisolated func readSelection(from pboard: sending NSPasteboard) -> Bool {
-    MainActor.assumeIsolated {
-      guard let str = pboard.getOpinionatedStringContents() else { return false }
-      let len = str.utf8CString.count
-      if len == 0 { return true }
-      str.withCString { ptr in
-        ghostty_surface_text(surface, ptr, UInt(len - 1))
-      }
-      return true
+  func readSelection(from pboard: NSPasteboard) -> Bool {
+    guard let str = pboard.getOpinionatedStringContents() else { return false }
+    let len = str.utf8CString.count
+    if len == 0 { return true }
+    str.withCString { ptr in
+      ghostty_surface_text(surface, ptr, UInt(len - 1))
     }
+    return true
   }
 }
 
-final class GhosttySurfaceScrollView: NSView {
+final class GhosttySurfaceScrollView: NSView, WindowTintMaskRegion {
   private struct ScrollbarState {
     let total: UInt64
     let offset: UInt64
@@ -2245,9 +2246,7 @@ final class GhosttySurfaceScrollView: NSView {
   }
 
   deinit {
-    MainActor.assumeIsolated {
-      observers.forEach { NotificationCenter.default.removeObserver($0) }
-    }
+    observers.forEach { NotificationCenter.default.removeObserver($0) }
   }
 
   override var safeAreaInsets: NSEdgeInsets { NSEdgeInsetsZero }
@@ -2260,6 +2259,14 @@ final class GhosttySurfaceScrollView: NSView {
     synchronizeScrollView()
     synchronizeSurfaceView()
     synchronizeCoreSurface()
+    // This wrapper is the tint's subtract mask; the rebuild runs inline so
+    // the hole lands in the same frame as the surface's geometry.
+    NotificationCenter.default.post(name: .ghosttyTintMaskRegionDidChange, object: self)
+  }
+
+  override func viewDidMoveToWindow() {
+    super.viewDidMoveToWindow()
+    NotificationCenter.default.post(name: .ghosttyTintMaskRegionDidChange, object: self)
   }
 
   func updateSurfaceSize() {

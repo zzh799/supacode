@@ -20,38 +20,68 @@ struct SidebarPersistenceKeyTests {
     #expect(groupActive == true)
   }
 
-  @Test func corruptFileIsRenamedBeforeFallback() async throws {
-    // Write the corrupt bytes to an isolated temp directory so the
-    // test never touches the user's real `~/.supacode/sidebar.json`.
-    // The live `\.settingsFileStorage` is used because we want to
-    // exercise the real `moveItem` rename path; `\.sidebarFileURL`
-    // is overridden to point at our temp file so the SharedKey
-    // reads/writes there exclusively.
-    let fileManager = FileManager.default
-    let sandbox = fileManager.temporaryDirectory
-      .appending(path: "SidebarPersistenceKeyTests-\(UUID().uuidString)", directoryHint: .isDirectory)
-    try fileManager.createDirectory(at: sandbox, withIntermediateDirectories: true)
-    defer {
-      try? fileManager.removeItem(at: sandbox)
-    }
-    let sidebarURL = sandbox.appending(path: "sidebar.json", directoryHint: .notDirectory)
-    try Data("this-is-not-json".utf8).write(to: sidebarURL)
+  @Test func sectionSortDefaultsToManual() {
+    // Alphabetical is a view overlay on top of curated drag order. Defaulting
+    // it on would silently reshuffle every existing sidebar on upgrade.
+    @Shared(.sidebarSectionSort) var sectionSort
+    #expect(sectionSort == .manual)
+  }
 
-    await withDependencies {
-      $0.settingsFileStorage = SettingsFileStorageKey.liveValue
-      $0.sidebarFileURL = sidebarURL
+  @Test func sectionSortRawValuesAreStablePersistenceTokens() {
+    #expect(SidebarSectionSort.manual.rawValue == "manual")
+    #expect(SidebarSectionSort.alphabetical.rawValue == "alphabetical")
+  }
+
+  @Test func sectionSortPersistsRawValue() {
+    withDependencies {
+      $0.defaultAppStorage = .inMemory
     } operation: {
-      // Touching `@Shared(.sidebar)` triggers `SidebarKey.load`,
-      // which on decode failure must rename the corrupt file.
-      @Shared(.sidebar) var sidebar
-      _ = sidebar
+      @Shared(.sidebarSectionSort) var sectionSort
+      $sectionSort.withLock { $0 = .alphabetical }
+      @Dependency(\.defaultAppStorage) var store
+      #expect(store.string(forKey: "sidebarSectionSort") == "alphabetical")
     }
+  }
 
-    #expect(!fileManager.fileExists(atPath: sidebarURL.path(percentEncoded: false)))
-    let entries = try fileManager.contentsOfDirectory(
-      at: sandbox, includingPropertiesForKeys: nil
-    )
-    let renamed = entries.first { $0.lastPathComponent.hasPrefix("sidebar.json.corrupt-") }
-    #expect(renamed != nil)
+  @Test func sectionSortUnknownRawValueFallsBackToManual() {
+    // A forward mode written by a newer build (the enum's "add a case" contract)
+    // must decode to `.manual` on an older build, never crash or wedge the list.
+    withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      @Dependency(\.defaultAppStorage) var store
+      store.set("byActivity", forKey: "sidebarSectionSort")
+      @Shared(.sidebarSectionSort) var sectionSort
+      #expect(sectionSort == .manual)
+    }
+  }
+
+  @Test func corruptBlobFallsBackToEmptyAndStashesItAside() {
+    // A garbage UserDefaults value must decode-fail into the empty default (never
+    // crash or wedge the sidebar), and the bytes must be preserved for recovery.
+    withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      @Dependency(\.defaultAppStorage) var store
+      let garbage = Data("this-is-not-json".utf8)
+      store.set(garbage, forKey: SidebarKey.storageKey)
+      @Shared(.sidebar) var sidebar
+      #expect(sidebar == SidebarState())
+      #expect(store.data(forKey: SidebarKey.storageKey + ".corrupt") == garbage)
+    }
+  }
+
+  @Test func savePersistsToUserDefaultsBlob() throws {
+    try withDependencies {
+      $0.defaultAppStorage = .inMemory
+    } operation: {
+      @Shared(.sidebar) var sidebar
+      $sidebar.withLock { $0.schemaVersion = 3 }
+
+      @Dependency(\.defaultAppStorage) var store
+      let data = try #require(store.data(forKey: SidebarKey.storageKey))
+      let decoded = try JSONDecoder().decode(SidebarState.self, from: data)
+      #expect(decoded.schemaVersion == 3)
+    }
   }
 }

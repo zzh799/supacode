@@ -174,6 +174,32 @@ struct SidebarItemFeatureTests {
     }
   }
 
+  /// The reducer never treats a stored running script as work: `isTaskRunning`
+  /// is driven by agent activity and terminal progress only, so a projection
+  /// carrying `runningScripts` without either does not shimmer the row (#828).
+  @Test func runningScriptAloneDoesNotMarkTheRowAsTaskRunning() async {
+    let store = TestStore(initialState: makeState(name: "feature")) {
+      SidebarItemFeature()
+    }
+    let scriptID = UUID()
+    await store.send(
+      .terminalProjectionChanged(makeProjection(runningScripts: [.init(id: scriptID, tint: .purple)]))
+    ) {
+      $0.hasTerminalProjection = true
+      $0.runningScripts = [.init(id: scriptID, tint: .purple)]
+    }
+    #expect(!store.state.isProgressBusy)
+    #expect(!store.state.hasAgentActivity)
+    #expect(!store.state.isTaskRunning)
+
+    // An agent starting work shimmers the row even while the script keeps running.
+    let busy = AgentPresenceFeature.AgentInstance(agent: .claude, activity: .busy)
+    await store.send(.agentSnapshotChanged(.init(agents: [busy], isWorking: true))) {
+      $0.agentSnapshot = .init(agents: [busy], isWorking: true)
+    }
+    #expect(store.state.isTaskRunning)
+  }
+
   @Test func terminalProjectionTogglesAllTabsDormant() async {
     let store = TestStore(initialState: makeState(name: "feature")) {
       SidebarItemFeature()
@@ -198,10 +224,10 @@ struct SidebarItemFeatureTests {
     // and a late result from the prior "feature/x" query is about to arrive.
     var state = makeState(name: "feature/y")
     state.branchName = "feature/y"
-    let livePR = GithubPullRequest(
+    let livePR = ForgePullRequest(
       number: 12,
       title: "Live",
-      state: "OPEN",
+      state: .open,
       additions: 1,
       deletions: 0,
       isDraft: false,
@@ -209,6 +235,7 @@ struct SidebarItemFeatureTests {
       mergeable: nil,
       mergeStateStatus: nil,
       updatedAt: nil,
+      mergedAt: nil,
       url: "https://example.com/pull/12",
       headRefName: "feature/y",
       baseRefName: "main",
@@ -221,10 +248,10 @@ struct SidebarItemFeatureTests {
     let store = TestStore(initialState: state) {
       SidebarItemFeature()
     }
-    let stalePR = GithubPullRequest(
+    let stalePR = ForgePullRequest(
       number: 99,
       title: "Stale",
-      state: "OPEN",
+      state: .open,
       additions: 0,
       deletions: 0,
       isDraft: false,
@@ -232,6 +259,7 @@ struct SidebarItemFeatureTests {
       mergeable: nil,
       mergeStateStatus: nil,
       updatedAt: nil,
+      mergedAt: nil,
       url: "https://example.com/pull/99",
       headRefName: "feature/x",
       baseRefName: "main",
@@ -251,10 +279,10 @@ struct SidebarItemFeatureTests {
     let store = TestStore(initialState: state) {
       SidebarItemFeature()
     }
-    let pullRequest = GithubPullRequest(
+    let pullRequest = ForgePullRequest(
       number: 1,
       title: "First",
-      state: "OPEN",
+      state: .open,
       additions: 1,
       deletions: 0,
       isDraft: false,
@@ -262,6 +290,7 @@ struct SidebarItemFeatureTests {
       mergeable: nil,
       mergeStateStatus: nil,
       updatedAt: nil,
+      mergedAt: nil,
       url: "https://example.com/pull/1",
       headRefName: "feature",
       baseRefName: "main",
@@ -314,6 +343,187 @@ struct SidebarItemFeatureTests {
   }
 
   // MARK: - Helpers.
+
+  @Test func pullRequestDetailAppliedEnrichesOnlyDetailFields() async {
+    var state = makeState(name: "feature")
+    let summary = ForgePullRequest(
+      number: 12,
+      title: "MR",
+      state: .open,
+      additions: nil,
+      deletions: nil,
+      isDraft: false,
+      reviewDecision: nil,
+      mergeable: nil,
+      mergeStateStatus: nil,
+      updatedAt: nil,
+      mergedAt: nil,
+      url: "https://gitlab.com/group/proj/-/merge_requests/12",
+      headRefName: "feature",
+      baseRefName: "main",
+      commitsCount: nil,
+      authorLogin: "dev",
+      statusCheckRollup: nil,
+      mergeQueueEntry: nil
+    )
+    state.pullRequest = summary
+    let store = TestStore(initialState: state) {
+      SidebarItemFeature()
+    }
+    let detail = ForgePullRequestDetail(
+      mergeable: "MERGEABLE",
+      mergeStateStatus: nil,
+      reviewDecision: nil,
+      statusCheckRollup: nil,
+      forgeBlockedReason: nil
+    )
+
+    await store.send(.pullRequestDetailApplied(pullRequestNumber: 12, detail)) {
+      $0.pullRequest = summary.applying(detail)
+    }
+    // The summary tier stays the sole writer of state and merge timestamps.
+    #expect(store.state.pullRequest?.state == .open)
+    #expect(store.state.pullRequest?.mergedAt == nil)
+    #expect(store.state.pullRequest?.mergeable == "MERGEABLE")
+    // A detail result for a different proposal is dropped.
+    await store.send(.pullRequestDetailApplied(pullRequestNumber: 99, detail))
+    // Detail never touches the branch watermark.
+    #expect(store.state.pullRequestBranchAtQueryTime == nil)
+  }
+
+  @Test func thinSummaryPreservesEnrichmentOnlyWhileTheProposalIsUnchanged() async {
+    var state = makeState(name: "feature")
+    let updatedAt = Date(timeIntervalSince1970: 1_000_000)
+    let thinSummary = ForgePullRequest(
+      number: 12,
+      title: "MR",
+      state: .open,
+      additions: nil,
+      deletions: nil,
+      isDraft: false,
+      reviewDecision: nil,
+      mergeable: nil,
+      mergeStateStatus: nil,
+      updatedAt: updatedAt,
+      mergedAt: nil,
+      url: "https://gitlab.com/group/proj/-/merge_requests/12",
+      headRefName: "feature",
+      baseRefName: "main",
+      commitsCount: nil,
+      authorLogin: "dev",
+      statusCheckRollup: nil,
+      mergeQueueEntry: nil
+    )
+    let detail = ForgePullRequestDetail(
+      mergeable: "MERGEABLE",
+      mergeStateStatus: nil,
+      reviewDecision: nil,
+      statusCheckRollup: nil,
+      forgeBlockedReason: nil
+    )
+    let enriched = thinSummary.applying(detail)
+    state.pullRequest = enriched
+    let store = TestStore(initialState: state) {
+      SidebarItemFeature()
+    }
+
+    // Same number, state, and updatedAt: the thin sweep keeps the enrichment.
+    await store.send(.pullRequestChanged(thinSummary, branchAtQueryTime: "feature"))
+    #expect(store.state.pullRequest?.mergeable == "MERGEABLE")
+
+    // A newer updatedAt means the proposal moved server-side; enrichment drops.
+    let movedSummary = ForgePullRequest(
+      number: 12,
+      title: "MR",
+      state: .open,
+      additions: nil,
+      deletions: nil,
+      isDraft: false,
+      reviewDecision: nil,
+      mergeable: nil,
+      mergeStateStatus: nil,
+      updatedAt: updatedAt.addingTimeInterval(60),
+      mergedAt: nil,
+      url: "https://gitlab.com/group/proj/-/merge_requests/12",
+      headRefName: "feature",
+      baseRefName: "main",
+      commitsCount: nil,
+      authorLogin: "dev",
+      statusCheckRollup: nil,
+      mergeQueueEntry: nil
+    )
+    await store.send(.pullRequestChanged(movedSummary, branchAtQueryTime: "feature")) {
+      $0.pullRequest = movedSummary
+    }
+    #expect(store.state.pullRequest?.mergeable == nil)
+  }
+
+  @Test func rollupOnlySummaryPreservesEnrichmentAndRefreshesThePipeline() async {
+    var state = makeState(name: "feature")
+    let updatedAt = Date(timeIntervalSince1970: 1_000_000)
+    let staleRollup = ForgePullRequestStatusCheckRollup(
+      checks: [ForgePullRequestStatusCheck(name: "Pipeline", status: "IN_PROGRESS")]
+    )
+    let freshRollup = ForgePullRequestStatusCheckRollup(
+      checks: [ForgePullRequestStatusCheck(name: "Pipeline", status: "COMPLETED", conclusion: "SUCCESS")]
+    )
+    let thinSummary = ForgePullRequest(
+      number: 12,
+      title: "MR",
+      state: .open,
+      additions: nil,
+      deletions: nil,
+      isDraft: false,
+      reviewDecision: nil,
+      mergeable: nil,
+      mergeStateStatus: nil,
+      updatedAt: updatedAt,
+      mergedAt: nil,
+      url: "https://gitlab.com/group/proj/-/merge_requests/12",
+      headRefName: "feature",
+      baseRefName: "main",
+      commitsCount: nil,
+      authorLogin: "dev",
+      statusCheckRollup: nil,
+      mergeQueueEntry: nil
+    )
+    state.pullRequest = thinSummary.applying(
+      ForgePullRequestDetail(mergeable: "MERGEABLE", statusCheckRollup: staleRollup)
+    )
+    let store = TestStore(initialState: state) {
+      SidebarItemFeature()
+    }
+
+    // A sweep carrying only the head-pipeline rollup keeps the enrichment and
+    // takes the newer pipeline state.
+    let rollupSummary = thinSummary.applying(ForgePullRequestDetail(statusCheckRollup: freshRollup))
+    await store.send(.pullRequestChanged(rollupSummary, branchAtQueryTime: "feature")) {
+      $0.pullRequest = thinSummary.applying(
+        ForgePullRequestDetail(mergeable: "MERGEABLE", statusCheckRollup: freshRollup)
+      )
+    }
+    #expect(store.state.pullRequest?.mergeable == "MERGEABLE")
+    #expect(store.state.pullRequest?.statusCheckRollup == freshRollup)
+
+    // A rollup-free sweep keeps the cached pipeline alongside the enrichment.
+    await store.send(.pullRequestChanged(thinSummary, branchAtQueryTime: "feature"))
+    #expect(store.state.pullRequest?.statusCheckRollup == freshRollup)
+    #expect(store.state.pullRequest?.mergeable == "MERGEABLE")
+  }
+
+  @Test func pullRequestDetailAppliedNoopsWithoutASummaryProposal() async {
+    let store = TestStore(initialState: makeState(name: "feature")) {
+      SidebarItemFeature()
+    }
+    let detail = ForgePullRequestDetail(
+      mergeable: "MERGEABLE",
+      mergeStateStatus: nil,
+      reviewDecision: nil,
+      statusCheckRollup: nil,
+      forgeBlockedReason: nil
+    )
+    await store.send(.pullRequestDetailApplied(pullRequestNumber: 12, detail))
+  }
 
   private func makeState(name: String) -> SidebarItemFeature.State {
     SidebarItemFeature.State(

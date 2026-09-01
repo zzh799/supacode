@@ -18,6 +18,7 @@ final class GhosttyRuntime {
   /// here.
   private nonisolated(unsafe) static var liveUserdataBits: Set<UInt> = []
   private nonisolated(unsafe) static var liveAppBits: Set<UInt> = []
+  private nonisolated(unsafe) static var liveSurfaceBits: Set<UInt> = []
 
   final class SurfaceReference {
     let surface: ghostty_surface_t
@@ -186,6 +187,7 @@ final class GhosttyRuntime {
     let ref = SurfaceReference(surface)
     surfaceRefs.append(ref)
     surfaceRefs = surfaceRefs.filter { $0.isValid }
+    Self.liveSurfaceBits.insert(UInt(bitPattern: surface))
     if let lastColorScheme {
       ghostty_surface_set_color_scheme(surface, lastColorScheme)
     }
@@ -195,6 +197,7 @@ final class GhosttyRuntime {
   func unregisterSurface(_ ref: SurfaceReference) {
     ref.invalidate()
     surfaceRefs = surfaceRefs.filter { $0.isValid }
+    Self.liveSurfaceBits.remove(UInt(bitPattern: ref.surface))
   }
 
   /// Reloads the full app config from disk and re-applies the current color scheme.
@@ -203,13 +206,14 @@ final class GhosttyRuntime {
       Self.logger.warning("Cannot reload app config: Ghostty app instance is nil.")
       return
     }
-    isBackgroundOpaque = false
     var target = ghostty_target_s()
     target.tag = GHOSTTY_TARGET_APP
     guard let loaded = Self.loadConfig() else {
       Self.logger.warning("Failed to reload app config.")
       return
     }
+    // Reset only once the reload is certain, so a failed load stays a no-op.
+    isBackgroundOpaque = false
     userBackgroundOpacity = loaded.userBackgroundOpacity
     applyConfig(loaded.config, target: target, app: app)
     ghostty_config_free(loaded.config)
@@ -317,12 +321,25 @@ final class GhosttyRuntime {
     guard let app else { return false }
     let appBits = UInt(bitPattern: app)
     if Thread.isMainThread {
+      // Synchronous: the caller is driving this surface right now (e.g. its
+      // creation, which emits the initial cell-size/title before the surface is
+      // registered), so it is live by construction.
       return MainActor.assumeIsolated {
         handleAction(appBits: appBits, target: target, action: action)
       }
     }
+    // A background surface thread can emit an action just before, or during, the
+    // surface's deferred free; capture its identity so the main-actor block can
+    // drop it if the surface was unregistered (closing/freed) in the meantime,
+    // rather than dereferencing a pointer that is about to be, or already is,
+    // freed.
+    let surfaceBits =
+      target.tag == GHOSTTY_TARGET_SURFACE
+      ? target.target.surface.map { UInt(bitPattern: $0) }
+      : nil
     DispatchQueue.main.async {
       MainActor.assumeIsolated {
+        if let surfaceBits, !liveSurfaceBits.contains(surfaceBits) { return }
         _ = handleAction(appBits: appBits, target: target, action: action)
       }
     }
@@ -470,9 +487,7 @@ final class GhosttyRuntime {
     guard target.tag == GHOSTTY_TARGET_SURFACE else { return false }
     guard let surface = target.target.surface else { return false }
     guard let bridge = surfaceBridge(fromSurface: surface) else { return false }
-    return MainActor.assumeIsolated {
-      bridge.handleAction(target: target, action: action)
-    }
+    return bridge.handleAction(target: target, action: action)
   }
 
   private static func readClipboard(
@@ -482,17 +497,16 @@ final class GhosttyRuntime {
   ) -> Bool {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return false }
-    return MainActor.assumeIsolated {
-      guard let surface = bridge.surface else { return false }
-      guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
-        return false
-      }
-      value.withCString { ptr in
-        ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
-      }
-      return true
+    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
+      return false
     }
+    guard let value = NSPasteboard.ghostty(location)?.getOpinionatedStringContents() else {
+      return false
+    }
+    value.withCString { ptr in
+      ghostty_surface_complete_clipboard_request(surface, ptr, state, false)
+    }
+    return true
   }
 
   private static func confirmReadClipboard(
@@ -504,12 +518,11 @@ final class GhosttyRuntime {
     _ = request
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     let state = stateBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
-    guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
-    MainActor.assumeIsolated {
-      guard let surface = bridge.surface else { return }
-      value.withCString { ptr in
-        ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
-      }
+    guard let bridge = surfaceBridge(fromUserdata: userdata), let surface = bridge.surface else {
+      return
+    }
+    value.withCString { ptr in
+      ghostty_surface_complete_clipboard_request(surface, ptr, state, true)
     }
   }
 
@@ -532,9 +545,7 @@ final class GhosttyRuntime {
   private static func closeSurface(userdataBits: UInt?, processAlive: Bool) {
     let userdata = userdataBits.flatMap { UnsafeMutableRawPointer(bitPattern: $0) }
     guard let bridge = surfaceBridge(fromUserdata: userdata) else { return }
-    MainActor.assumeIsolated {
-      bridge.closeSurface(processAlive: processAlive)
-    }
+    bridge.closeSurface(processAlive: processAlive)
   }
 
   private func setConfig(_ config: ghostty_config_t) {
@@ -544,31 +555,96 @@ final class GhosttyRuntime {
     self.config = config
   }
 
+  /// Pure decision for how the user-authored config tiers compose, given the
+  /// mode and whether `~/.supacode/ghostty.config` has content. Kept free of
+  /// GhosttyKit so the (mode x file-exists) matrix is unit-testable.
+  enum ConfigResolution {
+    struct Plan: Equatable {
+      /// Load the standard Ghostty config (default + recursive files).
+      var loadUserDefaultFiles: Bool
+      /// Layer `~/.supacode/ghostty.config` on top as the final tier.
+      var loadSupacodeUserConfig: Bool
+    }
+
+    static func plan(mode: GhosttyUserConfigMode, supacodeUserConfigExists: Bool) -> Plan {
+      // Exclusive only suppresses the standard config when there is actually a
+      // Supacode config to read instead; otherwise fall back to loading it so
+      // the terminal is never left with no user config at all.
+      let suppressesDefaults = mode == .exclusive && supacodeUserConfigExists
+      return Plan(
+        loadUserDefaultFiles: !suppressesDefaults,
+        loadSupacodeUserConfig: supacodeUserConfigExists
+      )
+    }
+  }
+
   private static func loadConfig() -> (config: ghostty_config_t, userBackgroundOpacity: Double)? {
     @Shared(.settingsFile) var settingsFile
-    let themeSyncEnabled = settingsFile.global.terminalThemeSyncEnabled
     let glassDisabled = settingsFile.global.uiGlassEffectDisabled
-    guard let config = ghostty_config_new() else { return nil }
-    ghostty_config_load_default_files(config)
-    ghostty_config_load_recursive_files(config)
+    let themeSyncEnabled = settingsFile.global.terminalThemeSyncEnabled
+    let supacodeUserConfigURL = SupacodePaths.ghosttyUserConfigURL
+    let plan = ConfigResolution.plan(
+      mode: settingsFile.global.ghosttyUserConfigMode,
+      supacodeUserConfigExists: SupacodePaths.ghosttyUserConfigHasContent()
+    )
+    guard let config = ghostty_config_new() else {
+      logger.error("ghostty_config_new returned nil; config load aborted.")
+      return nil
+    }
+    // Tier 1: the user's standard Ghostty config, unless exclusive mode suppresses it.
+    if plan.loadUserDefaultFiles {
+      ghostty_config_load_default_files(config)
+      ghostty_config_load_recursive_files(config)
+    }
+    // CLI args are process args, not a config file, so they are orthogonal to the
+    // suppression above (and inert on macOS); always apply them.
     ghostty_config_load_cli_args(config)
-    // Snapshot the user's opacity from a clone before the override clobbers it.
+    // Snapshot the user's opacity from a clone before the overlay clobbers it,
+    // mirroring the user tiers so the tint matches the active mode.
     let userOpacity: Double
     if let userView = ghostty_config_clone(config) {
       loadBundledTheme(into: userView, enabled: themeSyncEnabled, glassDisabled: glassDisabled)
+      if plan.loadSupacodeUserConfig {
+        loadUserFile(at: supacodeUserConfigURL, into: userView)
+      }
       ghostty_config_finalize(userView)
       userOpacity = readBackgroundOpacity(from: userView)
       ghostty_config_free(userView)
     } else {
       userOpacity = 1
     }
-    // Last-write-wins: overrides must follow theme so the bundled padding wins.
+    // Tier 2: the always-applied Supacode overlay (theme, then cosmetic
+    // overrides). The user's config may override these.
     loadBundledTheme(into: config, enabled: themeSyncEnabled, glassDisabled: glassDisabled)
     loadBundledOverrides(into: config)
+    // Tier 3: the user-authored Supacode config, layered on top so it overrides.
+    // Its `config-file` includes are not followed: re-running the recursive pass
+    // here would re-apply tier-1 includes on top and invert precedence.
+    if plan.loadSupacodeUserConfig {
+      loadUserFile(at: supacodeUserConfigURL, into: config)
+    }
+    // Tier 4: app-owned overrides, always last so nothing can override them.
+    loadAppOwnedOverrides(into: config, shortcutOverrides: settingsFile.global.shortcutOverrides)
     ghostty_config_finalize(config)
+    logDiagnostics(of: config)
     // With the glass effect disabled, windows must be fully opaque no matter
     // what the bundled theme or the user's own Ghostty config says.
     return (config, glassDisabled ? 1 : userOpacity)
+  }
+
+  private static func loadUserFile(at url: URL, into config: ghostty_config_t) {
+    url.path.withCString { ghostty_config_load_file(config, $0) }
+  }
+
+  /// The path Ghostty resolves for the user's standard config file (what the
+  /// `open_config` action edits). May name a file that does not exist yet.
+  static var standardConfigFilePath: String? {
+    let string = ghostty_config_open_path()
+    defer { ghostty_string_free(string) }
+    guard let ptr = string.ptr, string.len > 0 else { return nil }
+    let buffer = UnsafeRawBufferPointer(start: ptr, count: Int(string.len))
+    guard let path = String(bytes: buffer, encoding: .utf8), !path.isEmpty else { return nil }
+    return path
   }
 
   private static func readBackgroundOpacity(from config: ghostty_config_t) -> Double {
@@ -578,8 +654,8 @@ final class GhosttyRuntime {
     return min(max(value, 0), 1)
   }
 
-  /// Applies Supacode-specific config that takes precedence over user
-  /// settings.
+  /// Cosmetic Supacode defaults loaded in the middle tier; the user's own
+  /// Supacode config may override these.
   ///
   /// No `background-opacity` override: surfaces render translucent at the
   /// theme's opacity and keep their own OSC 11 color. The window tint behind
@@ -590,15 +666,28 @@ final class GhosttyRuntime {
   /// override): surfaces run the real shell with zmx injected as a Ghostty
   /// `command-wrapper`, so Ghostty resolves and integrates the shell exactly as
   /// it would without zmx, honoring the user's `command` / `shell-integration`.
-  ///
-  /// Supacode owns close-confirmation policy and UI. Keeping Ghostty's
-  /// predicate enabled makes its callback report prompt safety independently
-  /// of the user's Ghostty setting; `GlobalSettings.confirmCloseSurface`
-  /// decides whether Supacode presents the alert.
   internal static let bundledOverridesString = """
     window-padding-x = 14
     window-padding-y = 12,0
+    """
+
+  /// Behavioral overrides that must survive the user's Supacode config, so they
+  /// load last. Keeping Ghostty's close predicate enabled lets
+  /// `confirmCloseSurface` decide whether Supacode prompts. Forcing
+  /// `focus-follows-mouse` off hands hover-focus to Supacode's `hoverFocusMode`,
+  /// so the layout is the single authority and `.never` truly disables it. Search
+  /// is owned app-side (the Find menu), so Ghostty's default search chords are
+  /// unbound unconditionally here, not just via the customizable `AppShortcuts`,
+  /// so disabling or rebinding a Find shortcut can't leave Ghostty driving it.
+  /// Escape is left bound so it still cancels a search and reaches full-screen TUIs.
+  internal static let appOwnedOverridesString = """
     confirm-close-surface = true
+    focus-follows-mouse = false
+    keybind = super+f=unbind
+    keybind = super+e=unbind
+    keybind = super+g=unbind
+    keybind = super+shift+g=unbind
+    keybind = super+shift+f=unbind
     """
 
   /// Reports Supacode in `TERM_PROGRAM` so programs detect the real host
@@ -624,15 +713,52 @@ final class GhosttyRuntime {
 
   private static func loadBundledOverrides(into config: ghostty_config_t) {
     let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-defaults.conf")
-    let contents = [bundledOverridesString, terminalProgramOverrides(version: appVersion)]
-      .joined(separator: "\n")
     do {
-      try contents.write(to: tempURL, atomically: true, encoding: .utf8)
+      try bundledOverridesString.write(to: tempURL, atomically: true, encoding: .utf8)
     } catch {
-      logger.warning("Failed to write bundled defaults: \(error.localizedDescription)")
+      logger.error(
+        "Bundled overrides not delivered; the terminal loses its cosmetic defaults: \(error.localizedDescription)")
       return
     }
     tempURL.path.withCString { ghostty_config_load_file(config, $0) }
+  }
+
+  /// Writes the app-owned overrides (close predicate, TERM_PROGRAM, keybind
+  /// unbinds) as the final config tier so nothing can override them.
+  private static func loadAppOwnedOverrides(
+    into config: ghostty_config_t,
+    shortcutOverrides: [AppShortcutID: AppShortcutOverride]
+  ) {
+    let contents = [
+      appOwnedOverridesString,
+      terminalProgramOverrides(version: appVersion),
+      AppShortcuts.ghosttyKeybindConfigLines(from: shortcutOverrides).joined(separator: "\n"),
+    ]
+    .filter { !$0.isEmpty }
+    .joined(separator: "\n")
+    guard !contents.isEmpty else { return }
+    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-app-overrides.conf")
+    do {
+      try contents.write(to: tempURL, atomically: true, encoding: .utf8)
+    } catch {
+      // Losing this file leaves app chords bound and behavioral invariants unset.
+      logger.error(
+        "App-owned overrides not delivered; the terminal keeps the app's chords: \(error.localizedDescription)")
+      return
+    }
+    tempURL.path.withCString { ghostty_config_load_file(config, $0) }
+  }
+
+  /// Surfaces parse rejections that Ghostty otherwise records silently; a
+  /// dropped `keybind` line leaves that chord bound in the terminal.
+  private static func logDiagnostics(of config: ghostty_config_t) {
+    let count = ghostty_config_diagnostics_count(config)
+    guard count > 0 else { return }
+    for index in 0..<count {
+      let diagnostic = ghostty_config_get_diagnostic(config, index)
+      guard let message = diagnostic.message else { continue }
+      logger.error("Ghostty config diagnostic: \(String(cString: message))")
+    }
   }
 
   /// Loads the bundled Supacode light/dark theme plus its opacity and blur.
@@ -644,26 +770,25 @@ final class GhosttyRuntime {
     glassDisabled: Bool
   ) {
     guard enabled || glassDisabled else { return }
-    var lines: [String] = []
-    if enabled {
-      guard
-        let lightPath = Bundle.main.path(forResource: "Supacode Light", ofType: nil),
-        let darkPath = Bundle.main.path(forResource: "Supacode Dark", ofType: nil)
-      else {
-        assertionFailure("Bundled Supacode themes missing from app bundle.")
-        logger.warning("Bundled Supacode themes missing from app bundle.")
-        return
-      }
-      lines.append("theme = light:\(lightPath),dark:\(darkPath)")
+    guard
+      let lightPath = Bundle.main.path(forResource: "Supacode Light", ofType: nil),
+      let darkPath = Bundle.main.path(forResource: "Supacode Dark", ofType: nil)
+    else {
+      assertionFailure("Bundled Supacode themes missing from app bundle.")
+      logger.warning("Bundled Supacode themes missing from app bundle.")
+      return
     }
+    var lines: [String] = []
+    lines.append("theme = light:\(lightPath),dark:\(darkPath)")
     lines.append(
       glassDisabled
         ? backgroundDirectives(opacity: 1, blur: false)
         : backgroundDirectives(opacity: 0.9, blur: true)
     )
+    let contents = lines.joined(separator: "\n")
     let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("supacode-theme.conf")
     do {
-      try lines.joined(separator: "\n").write(to: tempURL, atomically: true, encoding: .utf8)
+      try contents.write(to: tempURL, atomically: true, encoding: .utf8)
     } catch {
       logger.warning("Failed to write bundled theme config: \(error.localizedDescription)")
       return
@@ -864,7 +989,7 @@ extension Notification.Name {
   // move or OSC 11), so window chrome re-tints to follow it.
   static let ghosttyFocusedSurfaceBackgroundDidChange = Notification.Name(
     "ghosttyFocusedSurfaceBackgroundDidChange")
-  // Posted when a tint mask region (the terminal body container) lays out or
+  // Posted when a tint mask region (a mounted surface wrapper) lays out or
   // attaches/detaches from its window, so `WindowTintBackdrop` re-cuts the hole
   // it masks out of the window tint. Handled synchronously so the mask never lags
   // a frame behind the region: a stale hole flashes the transparent backing.

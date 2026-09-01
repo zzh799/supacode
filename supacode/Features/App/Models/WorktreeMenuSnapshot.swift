@@ -17,6 +17,8 @@ struct WorktreeMenuSnapshot: Equatable {
   var canNavigateForward: Bool = false
   var isInitialLoadComplete: Bool = false
   var selectedPullRequestURL: URL?
+  /// A git worktree (not a folder) is selected, so Open Pull Request can act.
+  var hasSelectedGitWorktree: Bool = false
   var notificationIndicatorCount: Int = 0
 }
 
@@ -35,6 +37,7 @@ extension AppFeature.State {
       canNavigateForward: repositories.canNavigateWorktreeHistoryForward,
       isInitialLoadComplete: repositories.isInitialLoadComplete,
       selectedPullRequestURL: pullRequestURL,
+      hasSelectedGitWorktree: repositories.selectedWorktreeSlice.map { !$0.isFolder } ?? false,
       notificationIndicatorCount: notificationIndicatorCount
     )
   }
@@ -68,6 +71,9 @@ extension AppFeature.State {
       }
       if old.selectedPullRequestURL != new.selectedPullRequestURL {
         diffs.append("selectedPullRequestURL")
+      }
+      if old.hasSelectedGitWorktree != new.hasSelectedGitWorktree {
+        diffs.append("hasSelectedGitWorktree")
       }
       if old.notificationIndicatorCount != new.notificationIndicatorCount {
         diffs.append("notificationIndicatorCount")
@@ -103,10 +109,10 @@ extension AppFeature.Action {
         return true
       case .notificationReceived, .tabCreated, .tabClosed, .focusChanged,
         .taskStatusChanged, .blockingScriptCompleted, .commandPaletteToggleRequested,
-        .setupScriptConsumed, .worktreeProjectionChanged, .tabProjectionChanged,
-        .tabRemoved, .tabRenamed, .worktreeStateTornDown, .tabProgressDisplayChanged,
+        .setupScriptConsumed, .worktreeProjectionChanged, .surfaceCreated,
+        .tabRemoved, .tabRenamed, .worktreeStateTornDown,
         .surfacesClosed, .agentHookEventReceived, .terminalHasAnySurfaceChanged,
-        .surfaceCreationFailed:
+        .surfaceCreationFailed, .initialTabCreationFailed:
         return false
       }
     // Hot agent-storm paths: per-tab churn never mutates snapshot inputs.
@@ -121,18 +127,22 @@ extension AppFeature.Action {
     case .applicationDidBecomeActive, .applicationDidResignActive,
       .appLaunched, .scenePhaseChanged, .openActionSelectionChanged,
       .refreshInstalledOpenActions, .installedOpenActionsResolved,
+      .refreshWorktreesRequested,
       .worktreeSettingsLoaded, .openSelectedWorktree, .revealInFinder,
-      .openWorktree, .openWorktreeFailed, .openFile, .requestQuit,
+      .openWorktree, .openWorktreeFailed, .openFile, .openFileFromExplorer, .requestQuit,
       .requestTerminateAllTerminalSessions, .newTerminal, .renameSelectedTerminalTab,
-      .selectTerminalTabAtIndex, .splitTerminal, .jumpToLatestUnread,
+      .selectTerminalTabAtIndex, .selectNextTerminalTab, .selectPreviousTerminalTab,
+      .splitTerminal, .toggleWindowModeForFocusedPane, .toggleSplitZoom,
+      .equalizeSplits, .focusSplit, .jumpToLatestUnread,
       .menuBarWorktreeSelected, .markAllNotificationsRead, .runScript, .runNamedScript,
       .manageRepositoryScripts,
       .stopScript, .stopRunScripts, .closeTab, .closeSurface,
       .startSearch, .searchSelection, .navigateSearchNext,
-      .navigateSearchPrevious, .endSearch,
+      .navigateSearchPrevious,
       .systemNotificationsPermissionFailed, .deeplinkReceived,
       .deeplink, .commandAckTimedOut, .deeplinkConfirmationTimedOut,
-      .deeplinkReferenceOpened, .alert, .deeplinkInputConfirmation:
+      .deeplinkReferenceOpened, .settingsRelocationDidNotFinish, .settingsStoreUnreadable,
+      .alert, .deeplinkInputConfirmation:
       return false
     }
   }

@@ -211,7 +211,7 @@ private struct MenuBarSectionHeader: View {
   var body: some View {
     HStack(spacing: 4) {
       Text(title)
-        .font(.caption)
+        .appFont(.caption)
         .fontWeight(.semibold)
         .foregroundStyle(.secondary)
       if let dotColor {

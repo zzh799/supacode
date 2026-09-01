@@ -31,10 +31,6 @@ public struct AppearanceSettingsView: View {
           Text("Appearance")
           Text("Follow the system appearance, or always use light or dark.")
         }
-        Toggle(isOn: $store.terminalThemeSyncEnabled) {
-          Text("Supacode terminal theme")
-          Text("When off, honors your Ghostty config theme.")
-        }
         Toggle(isOn: $store.uiGlassEffectDisabled) {
           Text("Disable UI glass effect")
           Text(
@@ -60,57 +56,29 @@ public struct AppearanceSettingsView: View {
           Text("Visibility")
           Text("Show Supacode in the Dock, the menu bar, or both.")
         }
-      }
-      Section("Persistence") {
-        Toggle(isOn: $store.terminateSessionsOnQuit) {
-          Text("Terminate sessions on quit")
-          Text(
-            """
-            Close all tabs and stop background shells when quitting.
-            Terminal persistence is powered by [zmx\u{00A0}\u{2197}](https://github.com/neurosnap/zmx).
-            """
-          )
-        }
-        Toggle(isOn: $store.terminalHibernationEnabled) {
-          HStack(spacing: 6) {
-            Text("Hibernate inactive terminals")
-            BetaBadge()
-          }
-          Text(
-            "Background terminal tabs release their renderer after a few minutes of inactivity "
-              + "and reconnect instantly when viewed. Sessions and running agents are unaffected."
-          )
-        }
+        GlobalHotkeySettingRow(store: store)
       }
       Section {
-        Toggle(isOn: $store.confirmCloseSurface) {
-          Text("Confirm before closing terminals")
-          Text("Asks before closing a terminal with a running process or a persisted background session.")
+        Picker(selection: $store.confirmCloseTab) {
+          ForEach(ConfirmCloseTabMode.allCases, id: \.self) { mode in
+            DefaultTaggedLabel(label: mode.label, isDefault: mode == GlobalSettings.default.confirmCloseTab)
+              .tag(mode)
+          }
+        } label: {
+          Text("Confirm before closing tabs")
+          Text(store.confirmCloseTab.subtitle)
         }
         Picker(selection: $store.confirmQuitMode) {
           ForEach(ConfirmQuitMode.allCases, id: \.self) { mode in
-            Text(mode.label).tag(mode)
+            DefaultTaggedLabel(label: mode.label, isDefault: mode == GlobalSettings.default.confirmQuitMode)
+              .tag(mode)
           }
         } label: {
           Text("Confirm before quitting app")
           Text(store.confirmQuitMode.subtitle)
         }
       }
-      Section {
-        Toggle(isOn: $store.remoteSessionPersistenceEnabled) {
-          HStack(spacing: 6) {
-            Text("Persist sessions on remote host")
-            BetaBadge()
-          }
-          Text(
-            """
-            Keeps SSH sessions alive across disconnects. Ignored when \
-            [zmx\u{00A0}\u{2197}](https://github.com/neurosnap/zmx) is not installed on the host.
-            """
-          )
-        }
-      }
-      Section("Editor") {
+      Section("Editor & Layout") {
         // The stored id deliberately keeps naming an uninstalled editor, so the choice
         // survives a reinstall. No row is tagged with it though, and an untagged
         // selection renders blank, so normalize for display and write back raw.
@@ -127,15 +95,36 @@ public struct AppearanceSettingsView: View {
         Picker(
           selection: defaultEditorID
         ) {
-          Text("Automatic")
+          DefaultTaggedLabel(label: "Auto", isDefault: true)
             .tag(OpenWorktreeAction.automaticSettingsID)
           ForEach(openActionOptions) { action in
             Text(action.labelTitle)
               .tag(action.settingsID)
           }
         } label: {
-          Text("Default editor")
+          Text("Global editor")
           Text("Applies to Worktrees without repository overrides.")
+        }
+        Picker(selection: $store.hoverFocusMode) {
+          ForEach(HoverFocusMode.allCases, id: \.self) { mode in
+            DefaultTaggedLabel(label: mode.label, isDefault: mode == .never).tag(mode)
+          }
+        } label: {
+          Text("Focus panes on hover")
+          Text("Move focus to a split pane as the pointer moves over it, within the active window.")
+        }
+      }
+      Section("Accessibility") {
+        Picker(selection: $store.chromeTextSize) {
+          ForEach(ChromeTextSize.allCases) { size in
+            DefaultTaggedLabel(label: size.label, isDefault: size == .default).tag(size)
+          }
+        } label: {
+          HStack(spacing: 6) {
+            Text("Text size")
+            BetaBadge()
+          }
+          Text("Sizes all non-terminal text. The terminal keeps its own font size.")
         }
       }
       Section {
@@ -162,16 +151,79 @@ public struct AppearanceSettingsView: View {
   }
 }
 
-/// Small system-styled tag marking a setting as Beta. Uses `.quaternary` fill so
-/// it tracks the theme and never introduces a custom color.
-private struct BetaBadge: View {
+// System-wide show/hide hotkey, sharing the recorder UX with the shortcut table.
+private struct GlobalHotkeySettingRow: View {
+  @Bindable var store: StoreOf<SettingsFeature>
+  @State private var isRecording = false
+
   var body: some View {
-    Text("Beta")
-      .font(.caption2)
-      .fontWeight(.semibold)
-      .foregroundStyle(.secondary)
-      .padding(.horizontal, 6)
-      .padding(.vertical, 2)
-      .background(.quaternary, in: .capsule)
+    LabeledContent {
+      HStack(spacing: 6) {
+        if let hotkey = store.globalToggleVisibilityHotkey {
+          Button {
+            isRecording = true
+          } label: {
+            Text(hotkey.displayString)
+              .foregroundStyle(.primary)
+          }
+          .buttonStyle(.plain)
+          .help("Change the shortcut.")
+          Button {
+            store.send(.setGlobalToggleHotkey(nil))
+          } label: {
+            Image(systemName: "xmark")
+              .imageScale(.small)
+              .fontWeight(.semibold)
+              .padding(2)
+              .accessibilityLabel("Remove shortcut")
+          }
+          .buttonStyle(.bordered)
+          .buttonBorderShape(.circle)
+          .controlSize(.small)
+          // Inset so the circle aligns with the disclosure controls in the rows below.
+          .padding(.trailing, 3.5)
+          .help("Remove the shortcut.")
+        } else {
+          Button("Record") {
+            isRecording = true
+          }
+          .help("Record a system-wide hotkey to toggle Supacode.")
+        }
+      }
+      .popover(isPresented: $isRecording) {
+        HotkeyRecorderPopover(
+          onRecorded: { store.send(.setGlobalToggleHotkey($0)) },
+          onCancelled: { isRecording = false },
+          conflictChecker: conflictName(for:)
+        )
+      }
+      .contextMenu {
+        Button("Record Shortcut…") { isRecording = true }
+        if store.globalToggleVisibilityHotkey != nil {
+          Divider()
+          Button("Remove Shortcut") { store.send(.setGlobalToggleHotkey(nil)) }
+        }
+      }
+    } label: {
+      Text("Global hotkey")
+      if store.globalHotkeyRegistrationFailed {
+        Text("That hotkey is unavailable. Another app may already use it.")
+          .foregroundStyle(.red)
+      } else {
+        Text("Toggle Supacode from anywhere.")
+      }
+    }
+  }
+
+  // A global chord captured system-wide would also shadow a matching in-app
+  // shortcut, so reject both system-reserved chords and effective app shortcuts.
+  private func conflictName(for override: AppShortcutOverride) -> String? {
+    let display = override.displayString
+    if AppShortcutOverride.allReservedDisplayStrings().contains(display) { return "the system" }
+    for shortcut in AppShortcuts.all {
+      guard let effective = shortcut.effective(from: store.shortcutOverrides) else { continue }
+      if effective.display == display { return shortcut.displayName }
+    }
+    return nil
   }
 }
